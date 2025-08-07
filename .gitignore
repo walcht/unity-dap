@@ -1,0 +1,14 @@
+/out/
+/extension/
+/upload/
+bin/*
+obj/
+/mono-debug-*/
+*.vsix
+*.zip
+*.exe
+*.exe.mdb
+mono-debug.userprefs
+npm-debug.log
+.vs/
+.DS_Store
