@@ -1,4 +1,6 @@
-﻿using System;
+﻿#pragma warning disable IDE1006, IDE0003, IDE0038
+
+using System;
 using System.Text;
 using System.IO;
 using System.Threading.Tasks;
@@ -100,6 +102,8 @@ namespace UnityDebugAdapter
     }
   }
 
+
+
   public class Event : ProtocolMessage
   {
     [JsonProperty(PropertyName = "event")]
@@ -115,33 +119,29 @@ namespace UnityDebugAdapter
     }
   }
 
-  /*
-   * The ProtocolServer can be used to implement a server that uses the VSCode debug protocol.
-   */
+
+
+  /// Can be used to implement a debug adapter protocol
   public abstract class ProtocolServer
   {
-    public bool TRACE;
-    public bool TRACE_RESPONSE;
-
     protected const int BUFFER_SIZE = 4096;
-    protected const string TWO_CRLF = @"\r\n\r\n";
     protected static Regex CONTENT_LENGTH_MATCHER;
 
-    protected static Encoding Encoding = System.Text.Encoding.UTF8;
+    protected static Encoding Encoding = Encoding.UTF8;
 
     private int _sequenceNumber;
-    private Dictionary<int, TaskCompletionSource<Response>> _pendingRequests;
+    private readonly Dictionary<int, TaskCompletionSource<Response>> _pendingRequests;
 
     private Stream _outputStream;
 
-    private ByteBuffer _rawData;
+    private readonly ByteBuffer _rawData;
     private int _bodyLength;
 
     private bool _stopRequested;
 
     public ProtocolServer()
     {
-      CONTENT_LENGTH_MATCHER = new Regex(@"Content-Length: (\d+)");
+      CONTENT_LENGTH_MATCHER = new Regex(@"Content-Length: (\d+)\r\n\r\n");
       Encoding = Encoding.UTF8;
       _sequenceNumber = 1;
       _bodyLength = -1;
@@ -204,10 +204,10 @@ namespace UnityDebugAdapter
 
     protected abstract void DispatchRequest(string command, dynamic args, Response response);
 
-    // ---- private ------------------------------------------------------------------------
 
     private void ProcessData()
     {
+      // assume that we don't get fragmented messages
       while (true)
       {
         if (_bodyLength >= 0)
@@ -215,29 +215,31 @@ namespace UnityDebugAdapter
           if (_rawData.Length >= _bodyLength)
           {
             var buf = _rawData.RemoveFirst(_bodyLength);
-
             _bodyLength = -1;
-
-            Dispatch(Encoding.GetString(buf));
-
+            string data = Encoding.GetString(buf);
+            Logger.LogTrace($"received data: {data}");
+            Dispatch(data);
             continue; // there may be more complete messages to process
           }
         }
         else
         {
           string s = _rawData.GetString(Encoding);
-          var idx = s.IndexOf(TWO_CRLF);
-          if (idx != -1)
+          if (string.IsNullOrWhiteSpace(s))
           {
-            Match m = CONTENT_LENGTH_MATCHER.Match(s);
-            if (m.Success && m.Groups.Count == 2)
-            {
-              _bodyLength = Convert.ToInt32(m.Groups[1].ToString());
-
-              _rawData.RemoveFirst(idx + TWO_CRLF.Length);
-
-              continue; // try to handle a complete message
-            }
+            _rawData.RemoveFirst(s.Length);
+            break;
+          }
+          Match m = CONTENT_LENGTH_MATCHER.Match(s);
+          if (m.Success && m.Groups.Count == 2)
+          {
+            _bodyLength = Convert.ToInt32(m.Groups[1].ToString());
+            _rawData.RemoveFirst(m.Index + "Content-Length: ".Length + m.Groups[1].Length + 4);
+            continue; // try to handle a complete message
+          }
+          else
+          {
+            Logger.LogWarn(@"could not regex 'Content-Length: (\d+)' in: " + s);
           }
         }
 
@@ -255,9 +257,6 @@ namespace UnityDebugAdapter
           case "request":
             {
               var request = JsonConvert.DeserializeObject<Request>(req);
-
-              Program.Log($"Command: {request.command}: {JsonConvert.SerializeObject(request.arguments, Formatting.Indented)}");
-
               var response = new Response(request);
               DispatchRequest(request.command, request.arguments, response);
               SendMessage(response);
@@ -267,8 +266,6 @@ namespace UnityDebugAdapter
           case "response":
             {
               var response = JsonConvert.DeserializeObject<Response>(req);
-
-              Program.Log($"Command: {response.command}: {JsonConvert.SerializeObject(response.message, Formatting.Indented)}");
               int seq = response.request_seq;
               lock (_pendingRequests)
               {
@@ -281,7 +278,14 @@ namespace UnityDebugAdapter
               }
             }
             break;
+          default:
+            Logger.LogWarn($"unsupported message type: {message.type}");
+            break;
         }
+      }
+      else
+      {
+        Logger.LogError($"could not deserialize provided request into a ProtocolMessage: {req}");
       }
     }
 
@@ -292,44 +296,37 @@ namespace UnityDebugAdapter
         message.seq = _sequenceNumber++;
       }
 
-      Program.Log(TRACE_RESPONSE && message.type == "response", " R: {0}", JsonConvert.SerializeObject(message, Formatting.Indented));
-
-      if (message.type == "event" && message is Event)
-      {
-        var e = message as Event;
-        Program.Log(TRACE, "E {0}: {1}", ((Event)message).eventType, JsonConvert.SerializeObject(e.body, Formatting.Indented));
-      }
-
       var data = ConvertToBytes(message);
       try
       {
         _outputStream.Write(data, 0, data.Length);
         _outputStream.Flush();
       }
-      catch (Exception)
+      catch (Exception e)
       {
-        // ignore
+        Logger.LogError($"{e.Message} {e.StackTrace}");
       }
     }
 
     private static byte[] ConvertToBytes(ProtocolMessage request)
     {
       var asJson = JsonConvert.SerializeObject(request);
+      Logger.LogTrace($"sent data: {asJson}");
       byte[] jsonBytes = Encoding.GetBytes(asJson);
 
-      string header = string.Format("Content-Length: {0}{1}", jsonBytes.Length, TWO_CRLF);
+      string header = string.Format($"Content-Length: {jsonBytes.Length}\r\n\r\n");
       byte[] headerBytes = Encoding.GetBytes(header);
 
       byte[] data = new byte[headerBytes.Length + jsonBytes.Length];
-      System.Buffer.BlockCopy(headerBytes, 0, data, 0, headerBytes.Length);
-      System.Buffer.BlockCopy(jsonBytes, 0, data, headerBytes.Length, jsonBytes.Length);
+      Buffer.BlockCopy(headerBytes, 0, data, 0, headerBytes.Length);
+      Buffer.BlockCopy(jsonBytes, 0, data, headerBytes.Length, jsonBytes.Length);
 
       return data;
     }
   }
 
-  //--------------------------------------------------------------------------------------
 
+  /// encapsulates a byte array (akin to a bytebuffer in Python)
   class ByteBuffer
   {
     private byte[] _buffer;
@@ -352,17 +349,17 @@ namespace UnityDebugAdapter
     public void Append(byte[] b, int length)
     {
       byte[] newBuffer = new byte[_buffer.Length + length];
-      System.Buffer.BlockCopy(_buffer, 0, newBuffer, 0, _buffer.Length);
-      System.Buffer.BlockCopy(b, 0, newBuffer, _buffer.Length, length);
+      Buffer.BlockCopy(_buffer, 0, newBuffer, 0, _buffer.Length);
+      Buffer.BlockCopy(b, 0, newBuffer, _buffer.Length, length);
       _buffer = newBuffer;
     }
 
     public byte[] RemoveFirst(int n)
     {
       byte[] b = new byte[n];
-      System.Buffer.BlockCopy(_buffer, 0, b, 0, n);
+      Buffer.BlockCopy(_buffer, 0, b, 0, n);
       byte[] newBuffer = new byte[_buffer.Length - n];
-      System.Buffer.BlockCopy(_buffer, n, newBuffer, 0, _buffer.Length - n);
+      Buffer.BlockCopy(_buffer, n, newBuffer, 0, _buffer.Length - n);
       _buffer = newBuffer;
       return b;
     }

@@ -1,4 +1,6 @@
-﻿using System;
+﻿#pragma warning disable IDE1006, IDE0003
+
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Newtonsoft.Json;
@@ -533,7 +535,7 @@ namespace UnityDebugAdapter
       {
         try
         {
-          var uri = new System.Uri(path);
+          var uri = new Uri(path);
           return uri.AbsoluteUri;
         }
         catch
@@ -562,7 +564,7 @@ namespace UnityDebugAdapter
           return uri.LocalPath;
         }
 
-        Program.Log("path not well formed: '{0}'", clientPath);
+        Logger.LogError($"path not well formed: '{clientPath}'");
         return null;
       }
       else

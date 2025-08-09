@@ -1,3 +1,5 @@
+#pragma warning disable IDE1006, IDE0003, IDE0038, IDE0001, IDE0031
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -6,18 +8,8 @@ using System.Net;
 using System.Threading;
 using Mono.Debugging.Client;
 using Mono.Debugging.Soft;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using ExceptionBreakpointsFilter = UnityDebugAdapter.ExceptionBreakpointsFilter;
-using InitializedEvent = UnityDebugAdapter.InitializedEvent;
-using OutputEvent = UnityDebugAdapter.OutputEvent;
-using Scope = UnityDebugAdapter.Scope;
-using Source = UnityDebugAdapter.Source;
-using SourceBreakpoint = UnityDebugAdapter.SourceBreakpoint;
-using StoppedEvent = UnityDebugAdapter.StoppedEvent;
-using TerminatedEvent = UnityDebugAdapter.TerminatedEvent;
-using Thread = UnityDebugAdapter.Thread;
-using ThreadEvent = UnityDebugAdapter.ThreadEvent;
-using Variable = UnityDebugAdapter.Variable;
 
 namespace UnityDebugAdapter
 {
@@ -41,24 +33,24 @@ namespace UnityDebugAdapter
     const int MAX_CONNECTION_ATTEMPTS = 10;
     const int CONNECTION_ATTEMPT_INTERVAL = 500;
 
-    AutoResetEvent m_ResumeEvent;
+    readonly AutoResetEvent m_ResumeEvent;
     bool m_DebuggeeExecuting;
     readonly object m_Lock = new object();
     SoftDebuggerSession m_Session;
     ProcessInfo m_ActiveProcess;
     Dictionary<string, Dictionary<int, Mono.Debugging.Client.Breakpoint>> m_Breakpoints;
-    List<Catchpoint> m_Catchpoints;
-    DebuggerSessionOptions m_DebuggerSessionOptions;
+    readonly List<Catchpoint> m_Catchpoints;
+    readonly DebuggerSessionOptions m_DebuggerSessionOptions;
 
-    Handles<ObjectValue[]> m_VariableHandles;
-    Handles<Mono.Debugging.Client.StackFrame> m_FrameHandles;
+    readonly Handles<ObjectValue[]> m_VariableHandles;
+    readonly Handles<Mono.Debugging.Client.StackFrame> m_FrameHandles;
     ObjectValue m_Exception;
-    Dictionary<int, Thread> m_SeenThreads;
+    readonly Dictionary<int, Thread> m_SeenThreads;
     bool m_Terminated;
 
     public UnityDebugSession()
     {
-      Program.Log("Constructing UnityDebugSession");
+      Logger.LogInfo("constructing UnityDebugSession");
       m_ResumeEvent = new AutoResetEvent(false);
       m_Breakpoints = new Dictionary<string, Dictionary<int, Mono.Debugging.Client.Breakpoint>>();
       m_VariableHandles = new Handles<ObjectValue[]>();
@@ -70,8 +62,10 @@ namespace UnityDebugAdapter
         EvaluationOptions = EvaluationOptions.DefaultOptions
       };
 
-      m_Session = new UnityDebuggerSession();
-      m_Session.Breakpoints = new BreakpointStore();
+      m_Session = new UnityDebuggerSession
+      {
+        Breakpoints = new BreakpointStore()
+      };
 
       m_Catchpoints = new List<Catchpoint>();
 
@@ -197,7 +191,7 @@ namespace UnityDebugAdapter
         SendOutput(isStdErr ? "stderr" : "stdout", text);
       };
 
-      Program.Log("Done constructing UnityDebugSession");
+      Logger.LogInfo("done constructing UnityDebugSession");
     }
 
     public Mono.Debugging.Client.StackFrame Frame { get; set; }
@@ -231,8 +225,6 @@ namespace UnityDebugAdapter
 
         supportsHitConditionalBreakpoints = true,
 
-        //supportsLogPoints = true,
-
         supportsSetVariable = true,
 
         // This debug adapter does not support exception breakpoint filters
@@ -250,9 +242,19 @@ namespace UnityDebugAdapter
 
     public override void Attach(Response response, dynamic args)
     {
-      Program.Log($"UnityDebug: Attach: {response} ; {args}");
-      var address = System.Net.IPAddress.Parse(args.GetType().GetProperty("address").GetValue(args, null));
-      int port = args.GetType().GetProperty("port").GetValue(args, null);
+      string address_str = GetString(args, "address");
+      if (address_str == null)
+      {
+        Logger.LogError("expected \"address\" property string in attach's arguments request");
+        return;
+      }
+      IPAddress address = IPAddress.Parse(address_str);
+      int port = GetInt(args, "port", -1);
+      if (port == -1)
+      {
+        Logger.LogError("expected \"port\" property int with a valid port in attach's arguments request");
+        return;
+      }
 
       SetExceptionBreakpoints(args.__exceptionOptions);
 
@@ -276,7 +278,7 @@ namespace UnityDebugAdapter
 
     void Connect(IPAddress address, int port)
     {
-      Program.Log($"UnityDebug: Connect to: {address}:{port}");
+      Logger.LogInfo($"connecting to: {address}:{port}");
       lock (m_Lock)
       {
         var args0 = new SoftDebuggerConnectArgs(string.Empty, address, port)
@@ -291,10 +293,8 @@ namespace UnityDebugAdapter
       }
     }
 
-    //---- private ------------------------------------------
     void SetExceptionBreakpoints(dynamic exceptionOptions)
     {
-      Program.Log($"UnityDebug: SetExceptionBreakpoints: {exceptionOptions}");
       if (exceptionOptions == null)
       {
         return;
@@ -339,9 +339,6 @@ namespace UnityDebugAdapter
 
     public override void Disconnect(Response response, dynamic args)
     {
-      Program.Log($"UnityDebug: Disconnect: {args}");
-      Program.Log($"UnityDebug: Disconnect: {response}");
-
       lock (m_Lock)
       {
         if (m_Session != null)
@@ -356,20 +353,18 @@ namespace UnityDebugAdapter
         }
       }
 
-      SendOutput("stdout", "UnityDebug: Disconnected");
+      SendOutput("stdout", "UnityDebugAdapter: Disconnected");
       SendResponse(response);
     }
 
     public override void SetFunctionBreakpoints(Response response, dynamic arguments)
     {
-      Program.Log($"UnityDebug: SetFunctionBreakpoints: {response} ; {arguments}");
       var breakpoints = new List<UnityDebugAdapter.Breakpoint>();
       SendResponse(response, new SetFunctionBreakpointsBody(breakpoints.ToArray()));
     }
 
     public override void Continue(Response response, dynamic arguments)
     {
-      Program.Log($"UnityDebug: Continue: {response} ; {arguments}");
       WaitForSuspend();
       SendResponse(response, new ContinueResponseBody());
       lock (m_Lock)
@@ -383,7 +378,6 @@ namespace UnityDebugAdapter
 
     public override void Next(Response response, dynamic arguments)
     {
-      Program.Log($"UnityDebug: Next: {response} ; {arguments}");
       WaitForSuspend();
       SendResponse(response);
       lock (m_Lock)
@@ -397,7 +391,6 @@ namespace UnityDebugAdapter
 
     public override void StepIn(Response response, dynamic arguments)
     {
-      Program.Log($"UnityDebug: StepIn: {response} ; {arguments}");
       WaitForSuspend();
       SendResponse(response);
       lock (m_Lock)
@@ -411,7 +404,6 @@ namespace UnityDebugAdapter
 
     public override void StepOut(Response response, dynamic arguments)
     {
-      Program.Log($"UnityDebug: StepIn: {response} ; {arguments}");
       WaitForSuspend();
       SendResponse(response);
       lock (m_Lock)
@@ -425,7 +417,6 @@ namespace UnityDebugAdapter
 
     public override void Pause(Response response, dynamic arguments)
     {
-      Program.Log($"UnityDebug: StepIn: {response} ; {arguments}");
       SendResponse(response);
       PauseDebugger();
     }
@@ -476,7 +467,6 @@ namespace UnityDebugAdapter
 
     public override void SetExceptionBreakpoints(Response response, dynamic arguments)
     {
-      Program.Log($"UnityDebug: StepIn: {response} ; {arguments}");
       SetExceptionBreakpoints(arguments.exceptionOptions);
       SendResponse(response);
     }
@@ -552,7 +542,7 @@ namespace UnityDebugAdapter
           }
           catch (Exception e)
           {
-            Program.Log(e.StackTrace);
+            Logger.LogError($"SetBreakpoints error: msg: {e.Message}, stacktrace: {e.StackTrace}");
             SendErrorResponse(response, 3011, "setBreakpoints: " + e.Message, null, false, true);
             responseBreakpoints.Add(new UnityDebugAdapter.Breakpoint(false, breakpoint.line, breakpoint.column, e.Message));
           }
@@ -569,7 +559,6 @@ namespace UnityDebugAdapter
 
     public override void StackTrace(Response response, dynamic arguments)
     {
-      Program.Log($"UnityDebug: StackTrace: {response} ; {arguments}");
       int maxLevels = GetInt(arguments, "levels", 10);
       int startFrame = GetInt(arguments, "startFrame", 0);
       int threadReference = GetInt(arguments, "threadId", 0);
@@ -822,7 +811,7 @@ namespace UnityDebugAdapter
       }
     }
 
-    void Terminate(string reason)
+    void Terminate(string _)
     {
       if (!m_Terminated)
       {
@@ -893,14 +882,16 @@ namespace UnityDebugAdapter
       return MONO_EXTENSIONS.Any(path.EndsWith);
     }
 
-    static int GetInt(dynamic container, string propertyName, int dflt = 0)
+    static int GetInt(dynamic args, string property, int dflt = 0)
     {
       try
       {
-        return (int)container[propertyName];
+        return (int)args[property];
       }
       catch (Exception)
       {
+        // this happens so often that it fills up the log fast => hence the LogDebug and not LogWarn
+        Logger.LogDebug($"could not GetInt from dynamic container: {JsonConvert.SerializeObject(args)} at property: {property}");
         // ignore and return default value
       }
 
@@ -912,6 +903,8 @@ namespace UnityDebugAdapter
       var s = (string)args[property];
       if (s == null)
       {
+        // this happens so often that it fills up the log fast => hence the LogDebug and not LogWarn
+        Logger.LogDebug($"could not GetString from dynamic args: {JsonConvert.SerializeObject(args)} at property: {property}");
         return dflt;
       }
 
