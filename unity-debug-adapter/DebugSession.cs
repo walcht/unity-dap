@@ -1,476 +1,142 @@
-﻿#pragma warning disable IDE1006, IDE0003
-
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace UnityDebugAdapter
 {
-  // ---- Types -------------------------------------------------------------------------
-
-  public class Message
-  {
-    public int id { get; }
-    public string format { get; }
-    public dynamic variables { get; }
-    public dynamic showUser { get; }
-    public dynamic sendTelemetry { get; }
-
-    public Message(int id, string format, dynamic variables = null, bool user = true, bool telemetry = false)
-    {
-      this.id = id;
-      this.format = format;
-      this.variables = variables;
-      this.showUser = user;
-      this.sendTelemetry = telemetry;
-    }
-  }
-
-  public class StackFrame
-  {
-    public int id { get; }
-    public Source source { get; }
-    public int line { get; }
-    public int column { get; }
-    public string name { get; }
-    public string presentationHint { get; }
-
-    public StackFrame(int id, string name, Source source, int line, int column, string hint)
-    {
-      this.id = id;
-      this.name = name;
-      this.source = source;
-
-      // These should NEVER be negative
-      this.line = Math.Max(0, line);
-      this.column = Math.Max(0, column);
-
-      this.presentationHint = hint;
-    }
-  }
-
-  public class Scope
-  {
-    public string name { get; }
-    public int variablesReference { get; }
-    public bool expensive { get; }
-
-    public Scope(string name, int variablesReference, bool expensive = false)
-    {
-      this.name = name;
-      this.variablesReference = variablesReference;
-      this.expensive = expensive;
-    }
-  }
-
-  public class Variable
-  {
-    public string name { get; }
-    public string value { get; }
-    public string type { get; }
-    public int variablesReference { get; }
-
-    public Variable(string name, string value, string type, int variablesReference = 0)
-    {
-      this.name = name;
-      this.value = value;
-      this.type = type;
-      this.variablesReference = variablesReference;
-    }
-  }
-
-  public class Thread
-  {
-    public int id { get; }
-    public string name { get; }
-
-    public Thread(int id, string name)
-    {
-      this.id = id;
-      if (name == null || name.Length == 0)
-      {
-        this.name = string.Format("Thread #{0}", id);
-      }
-      else
-      {
-        this.name = name;
-      }
-    }
-  }
-
-  public class Source
-  {
-    public string name { get; }
-    public string path { get; }
-    public int sourceReference { get; }
-    public string presentationHint { get; }
-
-    public Source(string name, string path, int sourceReference, string hint)
-    {
-      this.name = name;
-      this.path = path;
-      this.sourceReference = sourceReference;
-      this.presentationHint = hint;
-    }
-  }
-
-  public class Breakpoint
-  {
-    public int id { get; }
-    public bool verified { get; }
-    public string message { get; }
-    public Source source { get; }
-    public int line { get; }
-    public int column { get; }
-    public int endLine { get; }
-    public int endColumn { get; }
-
-    public Breakpoint(bool verified, int line, int column, string logMessage)
-    {
-      this.verified = verified;
-      this.line = line;
-      this.column = column;
-      this.message = logMessage;
-    }
-  }
-
-  // ---- Events -------------------------------------------------------------------------
-
-  public class InitializedEvent : Event
-  {
-    public InitializedEvent()
-        : base("initialized") { }
-  }
-
-  public class StoppedEvent : Event
-  {
-    public StoppedEvent(int tid, string reasn, string txt = null)
-        : base("stopped", new
-        {
-          threadId = tid,
-          reason = reasn,
-          text = txt,
-          allThreadsStopped = true
-        })
-    { }
-  }
-
-  public class ExitedEvent : Event
-  {
-    public ExitedEvent(int exCode)
-        : base("exited", new { exitCode = exCode }) { }
-  }
-
-  public class TerminatedEvent : Event
-  {
-    public TerminatedEvent()
-        : base("terminated") { }
-  }
-
-  public class ThreadEvent : Event
-  {
-    public ThreadEvent(string reasn, int tid)
-        : base("thread", new
-        {
-          reason = reasn,
-          threadId = tid
-        })
-    { }
-  }
-
-  public class OutputEvent : Event
-  {
-    public OutputEvent(string cat, string outpt)
-        : base("output", new
-        {
-          category = cat,
-          output = outpt
-        })
-    { }
-  }
-
-  // ---- Response -------------------------------------------------------------------------
-
-  public class Capabilities : ResponseBody
-  {
-    public bool supportsConfigurationDoneRequest;
-    public bool supportsFunctionBreakpoints;
-    public bool supportsConditionalBreakpoints;
-    public bool supportsEvaluateForHovers;
-    public bool supportsSetVariable;
-    public bool supportsHitConditionalBreakpoints;
-    public bool supportsExceptionOptions;
-    public bool supportsLogPoints;
-    public ExceptionBreakpointsFilter[] exceptionBreakpointFilters;
-  }
-
-  public class ExceptionBreakpointsFilter
-  {
-    public string filter { get; }
-    public string label { get; }
-
-    [JsonProperty("default")]
-    public bool? defaultValue { get; }
-
-    public ExceptionBreakpointsFilter(string filter, string label, bool defaultValue = false)
-    {
-      this.filter = filter;
-      this.label = label;
-      this.defaultValue = defaultValue;
-    }
-  }
-
-  public class ErrorResponseBody : ResponseBody
-  {
-    public Message error { get; }
-
-    public ErrorResponseBody(Message error)
-    {
-      this.error = error;
-    }
-  }
-
-  public class StackTraceResponseBody : ResponseBody
-  {
-    public StackFrame[] stackFrames { get; }
-    public int totalFrames { get; }
-
-    public StackTraceResponseBody(List<StackFrame> frames, int total)
-    {
-      stackFrames = frames.ToArray<StackFrame>();
-      totalFrames = total;
-    }
-  }
-
-  public class ScopesResponseBody : ResponseBody
-  {
-    public Scope[] scopes { get; }
-
-    public ScopesResponseBody(List<Scope> scps)
-    {
-      scopes = scps.ToArray<Scope>();
-    }
-  }
-
-  public class VariablesResponseBody : ResponseBody
-  {
-    public Variable[] variables { get; }
-
-    public VariablesResponseBody(List<Variable> vars)
-    {
-      variables = vars.ToArray<Variable>();
-    }
-  }
-
-  public class ThreadsResponseBody : ResponseBody
-  {
-    public Thread[] threads { get; }
-
-    public ThreadsResponseBody(List<Thread> ths)
-    {
-      threads = ths.ToArray<Thread>();
-    }
-  }
-
-  public class EvaluateResponseBody : ResponseBody
-  {
-    public string result { get; }
-    public int variablesReference { get; }
-
-    public EvaluateResponseBody(string value, int reff = 0)
-    {
-      result = value;
-      variablesReference = reff;
-    }
-  }
-
-  public class SetBreakpointsResponseBody : ResponseBody
-  {
-    public Breakpoint[] breakpoints { get; }
-
-    public SetBreakpointsResponseBody(List<Breakpoint> bpts = null)
-    {
-      if (bpts == null)
-        breakpoints = new Breakpoint[0];
-      else
-        breakpoints = bpts.ToArray<Breakpoint>();
-    }
-  }
-
-  public class SetVariablesResponseBody : ResponseBody
-  {
-    public string value { get; }
-    public string type { get; }
-    public int variablesReference { get; }
-
-    public SetVariablesResponseBody(string value, string type, int variablesReference)
-    {
-      this.value = value;
-      this.type = type;
-      this.variablesReference = variablesReference;
-    }
-  }
-
-  public class ContinueResponseBody : ResponseBody
-  {
-    public bool allThreadsContinued = true;
-  }
-
-  public class SetFunctionBreakpointsBody : ResponseBody
-  {
-    public Breakpoint[] breakpoints { get; }
-
-    public SetFunctionBreakpointsBody(Breakpoint[] breakpoints)
-    {
-      this.breakpoints = breakpoints;
-    }
-  }
-
-  // ---- The Session --------------------------------------------------------
-
   public abstract class DebugSession : ProtocolServer
   {
-    private bool _clientLinesStartAt1 = true;
-    private bool _clientPathsAreURI = true;
+    protected bool _clientLinesStartAt1 = true;
+    protected bool _clientPathsAreURI = true;
 
     public DebugSession() { }
 
-    public void SendResponse(Response response, dynamic body = null)
+    public void SendErrorResponse(int requestSequence, string command, int id, string format, Dictionary<string, string> variables = null, bool user = true, bool telemetry = false)
     {
-      if (body != null)
+      var response = new Response()
       {
-        response.SetBody(body);
-      }
+        command = command,
+        request_seq = requestSequence,
+      };
+      if (string.IsNullOrEmpty(format))
+        throw new ArgumentException($"'{nameof(format)}' cannot be null or empty.", nameof(format));
 
+      var msg = new Message(id, format, variables, user, telemetry);
+      // TODO: format string somehow without using Reflection or dynamic
+      response.SetErrorBody("HEHHEHEHEHEHEHE", new ErrorResponseBody(msg));
       SendMessage(response);
     }
 
-    public void SendErrorResponse(Response response, int id, string format, dynamic arguments = null, bool user = true, bool telemetry = false)
+    protected override void DispatchRequest(int reqSeq, string command, JToken args)
     {
-      var msg = new Message(id, format, arguments, user, telemetry);
-      var message = Utilities.ExpandVariables(msg.format, msg.variables);
-      response.SetErrorBody(message, new ErrorResponseBody(msg));
-      SendMessage(response);
-    }
-
-    protected override void DispatchRequest(string command, dynamic args, Response response)
-    {
-      if (args == null)
-      {
-        args = new { };
-      }
-
       try
       {
         switch (command)
         {
           case "initialize":
-            if (args.linesStartAt1 != null)
-            {
-              _clientLinesStartAt1 = (bool)args.linesStartAt1;
-            }
-
-            var pathFormat = (string)args.pathFormat;
-            if (pathFormat != null)
-            {
-              switch (pathFormat)
-              {
-                case "uri":
-                  _clientPathsAreURI = true;
-                  break;
-                case "path":
-                  _clientPathsAreURI = false;
-                  break;
-                default:
-                  SendErrorResponse(response, 1015, "initialize: bad value '{_format}' for pathFormat", new { _format = pathFormat });
-                  return;
-              }
-            }
-
-            Initialize(response, args);
+            Initialize(reqSeq, args);
             break;
 
+          // done
           case "launch":
-            Launch(response, args);
+            Launch(reqSeq, args);
             break;
 
+          // done
           case "attach":
-            Attach(response, args);
+            Attach(reqSeq, args);
             break;
 
+          // done
           case "disconnect":
-            Disconnect(response, args);
+            Disconnect(reqSeq, args);
             break;
 
+          // done
           case "next":
-            Next(response, args);
+            Next(reqSeq, args);
             break;
 
+          // done
           case "continue":
-            Continue(response, args);
+            Continue(reqSeq, args);
             break;
 
+          // done
           case "stepIn":
-            StepIn(response, args);
+            StepIn(reqSeq, args);
             break;
 
+          // done
           case "stepOut":
-            StepOut(response, args);
+            StepOut(reqSeq, args);
             break;
 
+          // done
           case "pause":
-            Pause(response, args);
+            Pause(reqSeq, args);
             break;
 
+          // done
           case "stackTrace":
-            StackTrace(response, args);
+            StackTrace(reqSeq, args);
             break;
 
+          // done
           case "scopes":
-            Scopes(response, args);
+            Scopes(reqSeq, args);
             break;
 
+          // done
           case "variables":
-            Variables(response, args);
+            Variables(reqSeq, args);
             break;
 
+          // done
           case "source":
-            Source(response, args);
+            Source(reqSeq, args);
             break;
 
+          // done
           case "threads":
-            Threads(response, args);
+            Threads(reqSeq, args);
             break;
 
+          // done
           case "setBreakpoints":
-            SetBreakpoints(response, args);
+            SetBreakpoints(reqSeq, args);
             break;
 
+          // done
           case "setFunctionBreakpoints":
-            SetFunctionBreakpoints(response, args);
+            SetFunctionBreakpoints(reqSeq, args);
             break;
 
+          // done
           case "setExceptionBreakpoints":
-            SetExceptionBreakpoints(response, args);
+            SetExceptionBreakpoints(reqSeq, args);
             break;
 
+          // done
           case "evaluate":
-            Evaluate(response, args);
+            Evaluate(reqSeq, args);
             break;
 
+          // done
           case "setVariable":
-            SetVariable(response, args);
+            SetVariable(reqSeq, args);
             break;
 
           default:
-            SendErrorResponse(response, 1014, "unrecognized request: {_request}", new { _request = command });
+            SendErrorResponse(reqSeq, command, 1014, "unrecognized request: {_request}",
+                new Dictionary<string, string> { { "_request", command } });
             break;
         }
       }
       catch (Exception e)
       {
-        SendErrorResponse(response, 1104, "error while processing request '{_request}' (exception: {_exception})", new { _request = command, _exception = e.Message });
+        SendErrorResponse(reqSeq, command, 1104, "error while processing request '{_request}' (exception: {_exception})",
+            new Dictionary<string, string> { { "_request", command }, { "_exception", e.Message } });
       }
 
       if (command == "disconnect")
@@ -479,45 +145,44 @@ namespace UnityDebugAdapter
       }
     }
 
-    protected abstract void SetVariable(Response response, object args);
+    protected abstract void SetVariable(int reqSeq, JToken args);
 
-    public abstract void Initialize(Response response, dynamic args);
+    public abstract void Initialize(int reqSeq, JToken args);
 
-    public abstract void Launch(Response response, dynamic arguments);
+    public abstract void Launch(int reqSeq, JToken args);
 
-    public abstract void Attach(Response response, dynamic arguments);
+    public abstract void Attach(int reqSeq, JToken args);
 
-    public abstract void Disconnect(Response response, dynamic arguments);
+    public abstract void Disconnect(int reqSeq, JToken args);
 
-    public abstract void SetFunctionBreakpoints(Response response, dynamic arguments);
+    public abstract void SetFunctionBreakpoints(int reqSeq, JToken args);
 
-    public abstract void SetExceptionBreakpoints(Response response, dynamic arguments);
+    public abstract void SetExceptionBreakpoints(int reqSeq, JToken args);
 
-    public abstract void SetBreakpoints(Response response, dynamic arguments);
+    public abstract void SetBreakpoints(int reqSeq, JToken args);
 
-    public abstract void Continue(Response response, dynamic arguments);
+    public abstract void Continue(int reqSeq, JToken args);
 
-    public abstract void Next(Response response, dynamic arguments);
+    public abstract void Next(int reqSeq, JToken args);
 
-    public abstract void StepIn(Response response, dynamic arguments);
+    public abstract void StepIn(int reqSeq, JToken args);
 
-    public abstract void StepOut(Response response, dynamic arguments);
+    public abstract void StepOut(int reqSeq, JToken args);
 
-    public abstract void Pause(Response response, dynamic arguments);
+    public abstract void Pause(int reqSeq, JToken args);
 
-    public abstract void StackTrace(Response response, dynamic arguments);
+    public abstract void StackTrace(int reqSeq, JToken args);
 
-    public abstract void Scopes(Response response, dynamic arguments);
+    public abstract void Scopes(int reqSeq, JToken args);
 
-    public abstract void Variables(Response response, dynamic arguments);
+    public abstract void Variables(int reqSeq, JToken args);
 
-    public abstract void Source(Response response, dynamic arguments);
+    public abstract void Source(int reqSeq, JToken args);
 
-    public abstract void Threads(Response response, dynamic arguments);
+    public abstract void Threads(int reqSeq, JToken args);
 
-    public abstract void Evaluate(Response response, dynamic arguments);
+    public abstract void Evaluate(int reqSeq, JToken args);
 
-    // protected
 
     protected int ConvertDebuggerLineToClient(int line)
     {
@@ -552,25 +217,19 @@ namespace UnityDebugAdapter
     protected string ConvertClientPathToDebugger(string clientPath)
     {
       if (clientPath == null)
-      {
         return null;
-      }
 
-      if (_clientPathsAreURI)
-      {
-        if (Uri.IsWellFormedUriString(clientPath, UriKind.Absolute))
-        {
-          Uri uri = new Uri(clientPath);
-          return uri.LocalPath;
-        }
-
-        Logger.LogError($"path not well formed: '{clientPath}'");
-        return null;
-      }
-      else
-      {
+      if (!_clientPathsAreURI)
         return clientPath;
+
+      if (Uri.IsWellFormedUriString(clientPath, UriKind.Absolute))
+      {
+        var uri = new Uri(clientPath);
+        return uri.LocalPath;
       }
+
+      Logger.LogError($"path not well formed: '{clientPath}'");
+      return null;
     }
   }
 }

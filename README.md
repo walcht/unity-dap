@@ -80,6 +80,25 @@ Example of an invocation:
 mono bin/Release/unity-debug-adapter.exe --trace-level=trace --log-file=dap-log.txt
 ```
 
+## For Developers
+
+```
+                    Translates `requests` from nvim (which are DAP conformant)
+                    to Mono.Debugger-sepecific requests.
+                    Translates Mono.Debugger-specific
+                    responses to DAP-conformant `responses`.
+                    Writes logs to s_LogFile or stderr              Locally running Unity Editor (which always uses Mono). Or
+                              |                                     a local/remote running Unity Player instance using Mono
+                              |                                                 backend (with debugging enabled)
+                              |                                                             |
+    +------+            +-----------+                  +--------------------+ <  - - - - -  +
+    | Nvim |----------- | UNITY DAP | ---------------- |       UNITY        |
+    +------+     ^      +-----------+        ^         |   (Mono.Debugger)  |
+                 |                           |         +--------------------+
+                 |                           |
+         via stdin and stdout                + via a TCP/IP socket (ip:port)
+         (_outputStream and inputStream)
+```
 
 ## License
 
