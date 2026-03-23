@@ -2,27 +2,21 @@
 
 Unity Debug Adapter (DA) for debugging the Unity Editor or applications using the Mono scripting
 backend.
+
 > [!IMPORTANT]
-> debugging IL2CPP applications is not supported.
+> debugging IL2CPP applications is not and will not be supported.
 
 This project is adjusted (somewhat forked) from the deprecated and quite frankly bloated
-[vscode-unity-debug][vscode-unity-debug] project. [vscode-unity-debug][vscode-unity-debug] does
-not work out-of-the-box with new dotnet because of failure to detect the '\r\n\r\n' sequence
-in client <-> debug-adapter messages. The failure is caused by an IndexOf("\r\n\r\n") issue
-(see https://github.com/dotnet/runtime/issues/43736).
+[vscode-unity-debug][vscode-unity-debug] project.
 
-Since the project is stale and no longer accepts pull-requests/patches, fixing
-issues of the original [vscode-unity-debug][vscode-unity-debug] project and debloating
-it are the reasons for the existence of this project.
+If you are doing Unity development on a text-editor/IDE other than VSCode,
+Ryder, or Visual Studio, and you want debugging functionalities with a
+permissive license (MIT) then this project is for you.
 
-Hopefully when Unity finally moves to .NET Core, the need for this repository will cease to
-exist. In the meantime, if you are doing Unity development on a text-editor/IDE other than
-VSCode, Ryder, or Visual Studio, and you want debugging functionalities with a clear license
-(MIT) then this project is for you.
+In case you are looking for instructions on how to hook this to Neovim, see
+[neovim-unity][unity-debugger-support].
 
-In case you are looking for instructions on how to hook this to Neovim, see [neovim-unity][unity-debugger-support].
-
-## Installation
+## Build from Source
 
 Clone the repo and its submodule(s):
 
@@ -53,14 +47,26 @@ see [this issue](https://github.com/mono/debugger-libs/issues/402)):
 dotnet nuget add source 'https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json' -n "OutdatedPackages"
 ```
 
-Then, if you want to run the debug adapter, a global installation of Mono has to be
-available:
+## Usage
 
-```bash
-mono bin/Release/unity-debug-adapter.exe
-```
+`unity-debug-adapter.exe` accepts two optional parameters:
 
-You should then be seeying an output like this:
+- `--trace-level` sets the logging trace level: `trace` | `debug` | `info` | `warn` | `error` | `critical` | `none`
+- `--log-file` provides a path to a log file. In case this is not provided, and `--trace-level` is not `none`, logging
+  is output to stderr.
+
+To run the debug adapter, simply do:
+
+  ```bash
+  unity-debug-adapter.exe
+  ```
+
+  If you built this from source, you might need to:
+  ```bash
+  chmod +x bin/Release/unity-debug-adapter.exe
+  ```
+
+You should then get output like this:
 
 ```text
 21/08/2025 00:31:01 [I] waiting for debug protocol on stdin/stdout
@@ -68,19 +74,12 @@ You should then be seeying an output like this:
 21/08/2025 00:31:01 [I] done constructing UnityDebugSession
 ```
 
-## Usage
-
-`unity-debug-adapter.exe` accepts two optional long parameters:
-- `--trace-level` sets the logging trace level: `trace` | `debug` | `info` | `warn` | `error` | `critical` | `none`
-- `--log-file` provides a path to a log file. In case this is not provided, and `--trace-level` is not `none`, logging
-  is output to stderr.
-
-Example of an invocation:
-```bash
-mono bin/Release/unity-debug-adapter.exe --trace-level=trace --log-file=dap-log.txt
-```
-
 ## For Developers
+
+This section is mainly for developers interested in contributing or want to
+learn the intenals of this project.
+
+### Overview
 
 ```
                     Translates `requests` from nvim (which are DAP conformant)
@@ -99,6 +98,56 @@ mono bin/Release/unity-debug-adapter.exe --trace-level=trace --log-file=dap-log.
          via stdin and stdout                + via a TCP/IP socket (ip:port)
          (_outputStream and inputStream)
 ```
+
+### Backends
+
+This debug adapter essentially communicates with the following backends:
+
+- Mono.Debugger.Soft: this is the official Mono debugger in `debugger-libs`.
+- GDB: Mono applications can be debugged using `gdb`. This is still not
+implemented yet and is TODO.
+
+
+### Why not IL2CPP
+
+I will not include add support for debugging C# -> IL2CPP code mainly because
+of these facts/opinions:
+
+- IL2CPP is closed source and I might get into trouble if I implement something
+like what Visual Studio does (i.e., some sort of mapping between original C#
+code and generated IL2CPP C++ code).
+- I think it makes little sense to debug C++ code (generated or not) via
+stepping through a completely different language (e.g., managed C#).
+- Complexity. There are very few people who are using Neovim for Unity, fewer
+are using debuggers, and even fewer who want to debug IL2CPP through C# via
+Neovim. This is simply not worth the effort.
+- IL2CPP is simply C++. Just debug it using a proper C++ debugger (e.g., gdb).
+
+### Why Not Use [vscode-unity-debug][vscode-unity-debug]?
+
+[vscode-unity-debug][vscode-unity-debug] does not work out-of-the-box with new
+dotnet because of failure to detect the '\r\n\r\n' sequence in
+client <-> debug-adapter messages. The failure is caused by an
+`IndexOf("\r\n\r\n")` issue (see https://github.com/dotnet/runtime/issues/43736).
+
+Since the project is stale and no longer accepts pull-requests/patches, fixing
+issues of the original [vscode-unity-debug][vscode-unity-debug] project and
+debloating it are the reasons for the existence of this project.
+
+The project is also very poorly written, all responses are sent twice, the
+project relies on heavy usage of the `dynamic` keyword which requires JIT and
+which causes issues when this project is compiled with dotnet (rather than
+xbuild).
+
+
+### In an Ideal World
+
+Hopefully we get Unity .NET CLR support before the sun explodes so that we can
+use actual proper, industry-standard, open-source, and actively maintained
+.NET debuggers.
+
+When that happens, this adapter will add support to it and will, probably, be
+much more useful.
 
 ## License
 

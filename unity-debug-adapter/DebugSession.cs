@@ -1,29 +1,38 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using Newtonsoft.Json.Linq;
 
 namespace UnityDebugAdapter
 {
   public abstract class DebugSession : ProtocolServer
   {
+    protected static readonly Regex VARIABLE_REGEX = new Regex(@"\{_(\w+)\}");
     protected bool _clientLinesStartAt1 = true;
     protected bool _clientPathsAreURI = true;
 
     public DebugSession() { }
 
-    public void SendErrorResponse(int requestSequence, string command, int id, string format, Dictionary<string, string> variables = null, bool user = true, bool telemetry = false)
+    public void SendErrorResponse(int requestSequence, string command, int id, string format,
+        Dictionary<string, string> variables = null, bool user = true, bool telemetry = false)
     {
+      format ??= "";
+      variables ??= new Dictionary<string, string>();
       var response = new Response()
       {
         command = command,
         request_seq = requestSequence,
+        success = false, // this is set in SetErrorBody (but also just set it here for readability)
       };
-      if (string.IsNullOrEmpty(format))
-        throw new ArgumentException($"'{nameof(format)}' cannot be null or empty.", nameof(format));
-
       var msg = new Message(id, format, variables, user, telemetry);
-      // TODO: format string somehow without using Reflection or dynamic
-      response.SetErrorBody("HEHHEHEHEHEHEHE", new ErrorResponseBody(msg));
+      string msg_str = VARIABLE_REGEX.Replace(format, m =>
+      {
+        if (variables.TryGetValue(m.Groups[1].Value, out string replacement))
+          return replacement;
+        return $"{{{m.Groups[1].Value}}}: not found";
+      });
+
+      response.SetErrorBody(msg_str, new ErrorResponseBody(msg));
       SendMessage(response);
     }
 
@@ -37,92 +46,74 @@ namespace UnityDebugAdapter
             Initialize(reqSeq, args);
             break;
 
-          // done
           case "launch":
             Launch(reqSeq, args);
             break;
 
-          // done
           case "attach":
             Attach(reqSeq, args);
             break;
 
-          // done
           case "disconnect":
             Disconnect(reqSeq, args);
             break;
 
-          // done
           case "next":
             Next(reqSeq, args);
             break;
 
-          // done
           case "continue":
             Continue(reqSeq, args);
             break;
 
-          // done
           case "stepIn":
             StepIn(reqSeq, args);
             break;
 
-          // done
           case "stepOut":
             StepOut(reqSeq, args);
             break;
 
-          // done
           case "pause":
             Pause(reqSeq, args);
             break;
 
-          // done
           case "stackTrace":
             StackTrace(reqSeq, args);
             break;
 
-          // done
           case "scopes":
             Scopes(reqSeq, args);
             break;
 
-          // done
           case "variables":
             Variables(reqSeq, args);
             break;
 
-          // done
           case "source":
             Source(reqSeq, args);
             break;
 
-          // done
           case "threads":
             Threads(reqSeq, args);
             break;
 
-          // done
           case "setBreakpoints":
             SetBreakpoints(reqSeq, args);
             break;
 
-          // done
           case "setFunctionBreakpoints":
             SetFunctionBreakpoints(reqSeq, args);
             break;
 
-          // done
           case "setExceptionBreakpoints":
             SetExceptionBreakpoints(reqSeq, args);
             break;
 
-          // done
           case "evaluate":
             Evaluate(reqSeq, args);
             break;
 
-          // done
           case "setVariable":
             SetVariable(reqSeq, args);
             break;
@@ -189,11 +180,6 @@ namespace UnityDebugAdapter
       return _clientLinesStartAt1 ? line : line - 1;
     }
 
-    protected int ConvertClientLineToDebugger(int line)
-    {
-      return _clientLinesStartAt1 ? line : line + 1;
-    }
-
     protected string ConvertDebuggerPathToClient(string path)
     {
       if (_clientPathsAreURI)
@@ -212,24 +198,6 @@ namespace UnityDebugAdapter
       {
         return path;
       }
-    }
-
-    protected string ConvertClientPathToDebugger(string clientPath)
-    {
-      if (clientPath == null)
-        return null;
-
-      if (!_clientPathsAreURI)
-        return clientPath;
-
-      if (Uri.IsWellFormedUriString(clientPath, UriKind.Absolute))
-      {
-        var uri = new Uri(clientPath);
-        return uri.LocalPath;
-      }
-
-      Logger.LogError($"path not well formed: '{clientPath}'");
-      return null;
     }
   }
 }

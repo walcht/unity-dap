@@ -49,9 +49,9 @@ namespace UnityDebugAdapter
     /// <summary>
     /// Event-specific information.
     /// </summary>
-    public dynamic body { get; }
+    public object body { get; }
 
-    public Event(string type, dynamic bdy = null)
+    public Event(string type, object bdy = null)
         : base("event")
     {
       eventType = type;
