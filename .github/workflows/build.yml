@@ -59,7 +59,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
-            https://api.github.com/repos/walcht/unity-dap-dummy/releases \
+            https://api.github.com/repos/walcht/unity-dap/releases \
             -d '{"tag_name":"${{ github.ref_name }}","name":"unity-debug-adapter-${{ github.ref_name }}","body":"unity-debug-adapter release for win-x64, linux-x64, and osx-x64 platforms","generate_release_notes":true}' -o response.json
           STATUS=$(cat response.json | jq -r '.status')
           if [ $STATUS -ne 201 ]; then
@@ -77,7 +77,7 @@ jobs:
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               -H "X-GitHub-Api-Version: 2026-03-10" \
               -H "Content-Type: application/octet-stream" \
-              "https://uploads.github.com/repos/walcht/unity-dap-dummy/releases/$RELEASE_ID/assets?name=$ARTIFACT_NAME" \
+              "https://uploads.github.com/repos/walcht/unity-dap/releases/$RELEASE_ID/assets?name=$ARTIFACT_NAME" \
               --data-binary "@$ARTIFACT_NAME" -o response.json
             STATUS=$(cat response.json | jq -r '.status')
             if [ $STATUS -ne 201 ]; then
