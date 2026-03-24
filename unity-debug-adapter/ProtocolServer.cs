@@ -14,30 +14,20 @@ namespace UnityDebugAdapter
   /// </summary>
   public abstract class ProtocolServer
   {
-    protected const int BUFFER_SIZE = 4096;
-    protected static Regex CONTENT_LENGTH_MATCHER;
+    protected static readonly int BUFFER_SIZE = 4096;
+    protected static Regex CONTENT_LENGTH_MATCHER = new Regex(@"Content-Length: (\d+)\r\n\r\n");
 
-    protected static Encoding Encoding = Encoding.UTF8;
-
-    private int _sequenceNumber;
-    private readonly Dictionary<int, TaskCompletionSource<Response>> _pendingRequests;
+    private int _sequenceNumber = 1;
+    // TODO: use concurrent Dictionary instead...
+    private readonly Dictionary<int, TaskCompletionSource<Response>> _pendingRequests
+      = new Dictionary<int, TaskCompletionSource<Response>>();
 
     private Stream _outputStream;
 
-    private readonly ByteBuffer _rawData;
-    private int _bodyLength;
+    private readonly ByteBuffer _rawData = new ByteBuffer();
+    private int _bodyLength = -1;
 
     private bool _stopRequested;
-
-    public ProtocolServer()
-    {
-      CONTENT_LENGTH_MATCHER = new Regex(@"Content-Length: (\d+)\r\n\r\n");
-      Encoding = Encoding.UTF8;
-      _sequenceNumber = 1;
-      _bodyLength = -1;
-      _rawData = new ByteBuffer();
-      _pendingRequests = new Dictionary<int, TaskCompletionSource<Response>>();
-    }
 
     public async Task Start(Stream inputStream, Stream outputStream)
     {
@@ -53,6 +43,7 @@ namespace UnityDebugAdapter
         if (read == 0)
         {
           // end of stream
+          Logger.LogTrace("end of stream reached - exiting the debug adapter");
           break;
         }
 
@@ -64,15 +55,18 @@ namespace UnityDebugAdapter
       }
     }
 
+
     public void Stop()
     {
       _stopRequested = true;
     }
 
+
     public void SendEvent(Event e)
     {
       SendMessage(e);
     }
+
 
     public Task<Response> SendRequest(string command, object args)
     {
@@ -92,12 +86,12 @@ namespace UnityDebugAdapter
       return tcs.Task;
     }
 
+
     protected abstract void DispatchRequest(int reqSeq, string command, JToken args);
 
 
     private void ProcessData()
     {
-      // assume that we don't get fragmented messages
       while (true)
       {
         if (_bodyLength >= 0)
@@ -105,21 +99,27 @@ namespace UnityDebugAdapter
           if (_rawData.Length >= _bodyLength)
           {
             var buf = _rawData.RemoveFirst(_bodyLength);
-            _bodyLength = -1;
-            string data = Encoding.GetString(buf);
-            Logger.LogTrace($"received data: {data}");
+            string data = Encoding.UTF8.GetString(buf);
+            Logger.LogTrace("received data: Content-Length: ({0})rnrn{{{1}}}", _bodyLength, data);
             Dispatch(data);
+            _bodyLength = -1;
             continue; // there may be more complete messages to process
           }
+          else  // currently held raw data is insufficient to completely re-construct the body
+          {
+            break;
+          }
         }
-        else
+        else // (_bodyLength == -1) means we got a new message (i.e., a message with Content-Length: (\d+): \r\n\r\n{body})
         {
-          string s = _rawData.GetString(Encoding);
+          string s = _rawData.GetString();
+
           if (string.IsNullOrWhiteSpace(s))
           {
             _rawData.RemoveFirst(s.Length);
             break;
           }
+
           Match m = CONTENT_LENGTH_MATCHER.Match(s);
           if (m.Success && m.Groups.Count == 2)
           {
@@ -129,7 +129,8 @@ namespace UnityDebugAdapter
           }
           else
           {
-            Logger.LogWarn(@"could not regex 'Content-Length: (\d+)' in: " + s);
+            // TODO: do proper exit strategy here
+            Logger.LogWarn(@"could not regex 'Content-Length: (\d+)' in: {0}", s);
           }
         }
 
@@ -142,7 +143,7 @@ namespace UnityDebugAdapter
       var message = JsonConvert.DeserializeObject<ProtocolMessage>(req);
       if (message == null)
       {
-        Logger.LogError($"could not deserialize provided request into a ProtocolMessage: {req}");
+        Logger.LogError("could not deserialize provided request into a ProtocolMessage: {0}", req);
         return;
       }
       switch (message.type)
@@ -176,17 +177,16 @@ namespace UnityDebugAdapter
           // we don't care about events for the moment
           break;
         default:
-          Logger.LogWarn($"unsupported message type: {message.type}");
+          Logger.LogWarn("unsupported message type: {0}", message.type);
           break;
       }
     }
 
+
     protected void SendMessage(ProtocolMessage message)
     {
       if (message.seq == 0)
-      {
         message.seq = _sequenceNumber++;
-      }
 
       var data = ConvertToBytes(message);
       try
@@ -196,18 +196,19 @@ namespace UnityDebugAdapter
       }
       catch (Exception e)
       {
-        Logger.LogError($"{e.Message} {e.StackTrace}");
+        Logger.LogError("{0} {1}", e.Message, e.StackTrace);
       }
+
+      Logger.LogTrace("sent {0}: {1}", message.type, message);
     }
 
     private static byte[] ConvertToBytes(ProtocolMessage request)
     {
       var asJson = JsonConvert.SerializeObject(request);
-      Logger.LogTrace($"sent data: {asJson}");
-      byte[] jsonBytes = Encoding.GetBytes(asJson);
+      byte[] jsonBytes = Encoding.UTF8.GetBytes(asJson);
 
       string header = string.Format($"Content-Length: {jsonBytes.Length}\r\n\r\n");
-      byte[] headerBytes = Encoding.GetBytes(header);
+      byte[] headerBytes = Encoding.UTF8.GetBytes(header);
 
       byte[] data = new byte[headerBytes.Length + jsonBytes.Length];
       Buffer.BlockCopy(headerBytes, 0, data, 0, headerBytes.Length);
@@ -218,26 +219,27 @@ namespace UnityDebugAdapter
   }
 
 
-  /// encapsulates a byte array (akin to a bytebuffer in Python)
+  /// <summary> Encapsulates a byte array (akin to a bytebuffer in Python). </summary>
   class ByteBuffer
   {
-    private byte[] _buffer;
+    private byte[] _buffer = Array.Empty<byte>();
 
-    public ByteBuffer()
+    public int Length => _buffer.Length;
+
+    public string GetString() => Encoding.UTF8.GetString(_buffer);
+
+
+    /// <summary>
+    /// Pops a string from internal array [0, <paramref name="length">[.
+    /// </summary>
+    /// <param name="length"></param>
+    /// <returns></returns>
+    public string PopString(int _)
     {
-      _buffer = Array.Empty<byte>();
+      return string.Empty;
     }
 
-    public int Length
-    {
-      get { return _buffer.Length; }
-    }
-
-    public string GetString(Encoding enc)
-    {
-      return enc.GetString(_buffer);
-    }
-
+    // TODO: replace this fuckin garbage of a mess
     public void Append(byte[] b, int length)
     {
       byte[] newBuffer = new byte[_buffer.Length + length];

@@ -1,4 +1,4 @@
-﻿#pragma warning disable IDE1006, IDE0003, IDE0038
+﻿#pragma warning disable IDE1006, IDE0003
 
 using System;
 using System.Collections.Generic;
@@ -7,13 +7,6 @@ using Newtonsoft.Json;
 
 namespace UnityDebugAdapter
 {
-  public enum MessageType
-  {
-    REQUEST,
-    RESPONSE,
-    EVENT,
-  }
-
   //////////////////////////////////////////////////////////////////////////////
   /// BASE PROTOCOL
   //////////////////////////////////////////////////////////////////////////////
@@ -95,6 +88,14 @@ namespace UnityDebugAdapter
     {
       type = typ;
       seq = sq;
+    }
+
+    public override string ToString()
+    {
+      var bodyJson = JsonConvert.SerializeObject(this);
+      // print rnrn instead of \r\n\r\n to avoid ugly log output
+      string header = string.Format($"Content-Length: {bodyJson.Length}rnrn");
+      return header + bodyJson;
     }
   }
 

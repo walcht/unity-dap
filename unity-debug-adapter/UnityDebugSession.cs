@@ -1,5 +1,3 @@
-#pragma warning disable IDE1006, IDE0003, IDE0038, IDE0001, IDE0031
-
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -18,7 +16,7 @@ namespace UnityDebugAdapter
     {
       protected override void OnExit()
       {
-        this.Detach();
+        Detach();
       }
     }
 
@@ -73,10 +71,17 @@ namespace UnityDebugAdapter
         return true;
       };
 
-      m_Session.LogWriter = (isStdErr, text) =>
-      {
-        SendOutput(isStdErr ? "stderr" : "stdout", text);
-      };
+      // these are commented because they absolutely flood the REPL for front-end DAP clients
+      // m_Session.LogWriter = (isStdErr, text) =>
+      // {
+      //   SendOutput(isStdErr ? "stderr" : "stdout", text);
+      // };
+      //
+      //
+      // m_Session.OutputWriter = (isStdErr, text) =>
+      // {
+      //   SendOutput(isStdErr ? "stderr" : "stdout", text);
+      // };
 
       m_Session.TargetStopped += (sender, e) =>
       {
@@ -185,11 +190,6 @@ namespace UnityDebugAdapter
         SendEvent(new ThreadEvent("exited", tid));
       };
 
-      m_Session.OutputWriter = (isStdErr, text) =>
-      {
-        SendOutput(isStdErr ? "stderr" : "stdout", text);
-      };
-
       Logger.LogInfo("done constructing UnityDebugSession");
     }
 
@@ -267,7 +267,7 @@ namespace UnityDebugAdapter
 
     public override void Launch(int reqSeq, JToken args)
     {
-      _AttachInternal(args);
+      AttachInternal(args);
       var response = new Response()
       {
         command = "launch",
@@ -279,7 +279,7 @@ namespace UnityDebugAdapter
 
     public override void Attach(int reqSeq, JToken args)
     {
-      _AttachInternal(args);
+      AttachInternal(args);
       var response = new Response()
       {
         command = "attach",
@@ -289,7 +289,7 @@ namespace UnityDebugAdapter
       SendMessage(response);
     }
 
-    void _AttachInternal(JToken args)
+    void AttachInternal(JToken args)
     {
       var attachArgs = args.ToObject<LaunchRequestArguments>();
 
@@ -385,11 +385,15 @@ namespace UnityDebugAdapter
         success = true,
       };
       SendMessage(response);
+
+      // as per the specification, the debug adapter should terminate itself
+      DebuggerKill();
+      Environment.Exit(0);
     }
 
     public override void SetFunctionBreakpoints(int reqSeq, JToken args)
     {
-      var breakpoints = new List<UnityDebugAdapter.Breakpoint>();
+      var breakpoints = new List<Breakpoint>();
       var response = new Response()
       {
         command = "setFunctionBreakpoints",
@@ -613,7 +617,7 @@ namespace UnityDebugAdapter
         m_Breakpoints[path] = dictionary;
       }
 
-      var responseBreakpoints = new List<UnityDebugAdapter.Breakpoint>();
+      var responseBreakpoints = new List<Breakpoint>();
       foreach (var breakpoint in newBreakpoints)
       {
         if (!dictionary.ContainsKey(breakpoint.line))
@@ -628,20 +632,20 @@ namespace UnityDebugAdapter
               bp.TraceExpression = breakpoint.logMessage;
             }
             dictionary[breakpoint.line] = bp;
-            responseBreakpoints.Add(new UnityDebugAdapter.Breakpoint(true, breakpoint.line, breakpoint.column, breakpoint.logMessage));
+            responseBreakpoints.Add(new Breakpoint(true, breakpoint.line, breakpoint.column, breakpoint.logMessage));
           }
           catch (Exception e)
           {
             Logger.LogError($"SetBreakpoints error: msg: {e.Message}, stacktrace: {e.StackTrace}");
             SendErrorResponse(reqSeq, "setBreakpoints", 3011, "setBreakpoints: " + e.Message,
                 null, false, true);
-            responseBreakpoints.Add(new UnityDebugAdapter.Breakpoint(false, breakpoint.line, breakpoint.column, e.Message));
+            responseBreakpoints.Add(new Breakpoint(false, breakpoint.line, breakpoint.column, e.Message));
           }
         }
         else
         {
           dictionary[breakpoint.line].ConditionExpression = breakpoint.condition;
-          responseBreakpoints.Add(new UnityDebugAdapter.Breakpoint(true, breakpoint.line, breakpoint.column, breakpoint.logMessage));
+          responseBreakpoints.Add(new Breakpoint(true, breakpoint.line, breakpoint.column, breakpoint.logMessage));
         }
       }
 
@@ -663,13 +667,10 @@ namespace UnityDebugAdapter
       {
         // Console.Error.WriteLine("stackTrace: unexpected: active thread should be the one requested");
         thread = FindThread(threadReference);
-        if (thread != null)
-        {
-          thread.SetActive();
-        }
+        thread?.SetActive();
       }
 
-      var stackFrames = new List<UnityDebugAdapter.StackFrame>();
+      var stackFrames = new List<StackFrame>();
       var totalFrames = 0;
 
       var bt = thread.Backtrace;
@@ -705,7 +706,7 @@ namespace UnityDebugAdapter
           var frameHandle = m_FrameHandles.Create(frame);
           string name = frame.SourceLocation.MethodName;
           int line = frame.SourceLocation.Line;
-          stackFrames.Add(new UnityDebugAdapter.StackFrame(frameHandle, name, source, ConvertDebuggerLineToClient(line), 0, hint));
+          stackFrames.Add(new StackFrame(frameHandle, name, source, ConvertDebuggerLineToClient(line), 0, hint));
         }
       }
 
@@ -1005,7 +1006,7 @@ namespace UnityDebugAdapter
     Backtrace DebuggerActiveBacktrace()
     {
       var thr = DebuggerActiveThread();
-      return thr == null ? null : thr.Backtrace;
+      return thr?.Backtrace;
     }
 
     ExceptionInfo DebuggerActiveException()
