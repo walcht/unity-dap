@@ -6,7 +6,7 @@ backend.
 > [!IMPORTANT]
 > debugging IL2CPP applications is not and will not be supported.
 
-This project is adjusted (somewhat forked) from the deprecated and quite frankly bloated
+This project is adjusted (forked) from the deprecated and *quite frankly* bloated
 [vscode-unity-debug][vscode-unity-debug] project.
 
 If you are doing Unity development on a text-editor/IDE other than VSCode,
@@ -47,26 +47,18 @@ see [this issue](https://github.com/mono/debugger-libs/issues/402)):
 dotnet nuget add source 'https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json' -n "OutdatedPackages"
 ```
 
-## Usage
+Then, if you want to run the debug adapter:
 
-`unity-debug-adapter.exe` accepts two optional parameters:
-
-- `--trace-level` sets the logging trace level: `trace` | `debug` | `info` | `warn` | `error` | `critical` | `none`
-- `--log-file` provides a path to a log file. In case this is not provided, and `--trace-level` is not `none`, logging
-  is output to stderr.
-
-To run the debug adapter, simply do:
-
-  ```bash
-  unity-debug-adapter.exe
-  ```
+```bash
+bin/Release/unity-debug-adapter.exe
+```
 
   If you built this from source, you might need to:
   ```bash
   chmod +x bin/Release/unity-debug-adapter.exe
   ```
 
-You should then get output like this:
+You should then get an output like this:
 
 ```text
 21/08/2025 00:31:01 [I] waiting for debug protocol on stdin/stdout
