@@ -1,0 +1,88 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '*'
+    paths:
+      - unity-debug-adapter/**.cs
+      - unity-debug-adapter/**.csproj
+      - .gitmodules
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install jq
+        run: sudo apt-get install jq
+
+      - name: setup dotnet v9.0.x
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: display dotnet version
+        run: dotnet --version
+
+      - name: adding outdated packages (only on Linux)
+        run: dotnet nuget add source 'https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json' -n "OutdatedPackages"
+
+      - name: building and publishing for linux-x64 runtime
+        run: dotnet publish --configuration=Release --runtime=linux-x64 unity-debug-adapter/unity-debug-adapter.csproj
+
+      - name: building and publishing for win-x64 runtime
+        run: dotnet publish --configuration=Release --runtime=win-x64 unity-debug-adapter/unity-debug-adapter.csproj
+
+      - name: building and publishing for osx-x64 runtime
+        run: dotnet publish --configuration=Release --runtime=osx-x64 unity-debug-adapter/unity-debug-adapter.csproj
+
+      - name: zipping builds
+        run: |
+          pushd bin/Release/linux-x64
+          zip -r .
+          popd
+          pushd bin/Release/win-x64
+          zip -r .
+          popd
+          pushd bin/Release/osx-x64
+          zip -r .
+          popd
+
+      - name: create release page and upload artifact
+        if: github.ref_type == 'tag'
+        # do not use the garbage github action action-gh-release - it doesn't provide a way to generate multiple zip
+        # files. Just use github's releases API at:
+        # https://docs.github.com/en/rest/releases?apiVersion=2026-03-10
+        run: | 
+          RELEASE_ID=curl -L \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            https://api.github.com/repos/walcht/unity-dap/releases \
+            -d '{ \
+              "tag_name":"${{ github.ref_name }}", \
+              "target_commitish":"master", \
+              "name":"unity-debug-adapter-${{ github.ref_name }}", \
+              "body":"unity-debug-adapter release for win-x64, linux-x64, and osx-x64 platforms", \
+              "draft":false, \
+              "prerelease":false, \
+              "generate_release_notes":true \
+            }' | jq -r '.id'
+          for RUNTIME in win-x64, linux-x64, osx-x64; do \
+            pushd bin/Release/$RUNTIME
+            ARTIFACT_NAME=unity-debug-adapter-${{ github.ref_name }}-$RUNTIME.zip
+            curl -L -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            -H "Content-Type: application/octet-stream" \
+            "https://uploads.github.com/repos/walcht/unity-dap/releases/$RELEASE_ID/assets?name=$ARTIFACT_NAME" \
+            --data-binary "@$ARTIFACT_NAME" \
+            popd \
+            end
+
+          
