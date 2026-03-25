@@ -1,0 +1,162 @@
+# dotnet Github Actions build workflow with 0 reliance on Github Actions
+# marketplace. Only bash.
+name: build and publish
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      # replace this with git clone
+      # only clone to depth 1 because we don't care about Git history and only care about HEAD
+      - name: git clone unity-dap ${{ github.ref_name }}
+        run:
+          git clone --recurse-submodules --depth 1 --branch ${{ github.ref_name }} https://github.com/walcht/unity-dap.git
+          cd unity-dap/
+
+      # jq and curl are available in Github runners => no reason to check
+      # - name: install jq and curl
+      #   run: |
+      #     sudo apt-get install jq
+      #     sudo apt-get install curl
+
+      # github runners usually have the latest version of dotnet installed
+      - name: check dotnet --version >= v9.0.0
+        step_id: dotnet_install
+        run:
+          verify_dotnet_version() {
+            local regex="^([[:digit:]]+)\.([[:digit:]]+)\.([[:digit:]]+)"
+
+            if [[ $(dotnet --list-sdks) =~ $regex ]]
+            then
+              local MAJOR="${BASH_REMATCH[1]}"
+              local MINOR="${BASH_REMATCH[2]}"
+              local PATCH="${BASH_REMATCH[3]}"
+          
+              DOTNET_VERSION=$MAJOR.$MINOR.$PATCH
+          
+              if [ $1 = 'x' -o $1 = 'X' ]; then return 0; fi
+            
+              if [ $MAJOR -lt $1 ]; then
+                echo "error: available dotnet version MAJOR: ${MAJOR} is < required $1" >&2
+                return 1
+              fi
+          
+              if [ $2 = 'x' -o $2 = 'X' ]; then return 0; fi
+            
+              if [ $MINOR -lt $2 ]; then
+                echo "error: available dotnet version MINOR: ${MINOR} is < required $2" >&2
+                return 1
+              fi
+          
+              if [ $3 = 'x' -o $3 = 'X' ]; then return 0; fi
+            
+              if [ $PATCH -lt $3 ]; then
+                echo "error: available dotnet version PATH: ${PATCH} is < required $3" >&2
+                return 1
+              fi
+          
+              return 0
+            fi
+          }
+          
+          verify_dotnet_version "10" "0" "50"
+          
+          if [ $? -eq 0 ]; then
+            echo found dotnet version: $DOTNET_VERSION
+            echo $DOTNET_VERSION > $GITHUB_ENV
+          else
+            exit 1
+          fi
+
+      - name: adding outdated packages (only on Linux)
+        run: dotnet nuget add source 'https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json' -n "OutdatedPackages"
+
+      - name: building and publishing for linux-x64 runtime
+        run: dotnet publish --configuration=Release --runtime=linux-x64 unity-debug-adapter/unity-debug-adapter.csproj
+
+      - name: building and publishing for win-x64 runtime
+        run: dotnet publish --configuration=Release --runtime=win-x64 unity-debug-adapter/unity-debug-adapter.csproj
+
+      - name: building and publishing for osx-x64 runtime
+        run: dotnet publish --configuration=Release --runtime=osx-x64 unity-debug-adapter/unity-debug-adapter.csproj
+
+      - name: compressing builds
+        run: |
+          for RUNTIME in win-x64 linux-x64 osx-x64
+          do
+            pushd bin/Release/$RUNTIME/publish
+            zip -r unity-debug-adapter-${{ github.ref_name }}-$RUNTIME.zip .
+            popd
+          done
+
+      - name: create release page and upload artifact
+        if: github.ref_type == 'tag'
+        #
+        # Do not use the ga action-gh-release - it doesn't provide a way to generate multiple zip files.
+        # Just use github's releases Rest API at:
+        # https://docs.github.com/en/rest/releases?apiVersion=2026-03-10
+        #
+        # For increased security, make sure that the releases you publish are immutable (i.e., releases cannot be
+        # updated once out of draft mode).
+        #
+        #   1. create draft release
+        #   2. upload assests to said draft release
+        #   3. unset the draft flag on the said release (now it is immutable)
+        #
+        run: |
+          curl -L \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            https://api.github.com/repos/walcht/unity-dap/releases \
+            -d '{"tag_name":"${{ github.ref_name }}","name":"unity-debug-adapter-${{ github.ref_name }}","body":"unity-debug-adapter release for win-x64, linux-x64, and osx-x64 platforms","draft":true,"prerelease":false,"generate_release_notes":true}' -o response.json
+
+          verify_status_code() {
+            local STATUS=$(cat response.json | jq -r '.status')
+            if [ $STATUS -ne 201 ]; then
+              echo "$1: $STATUS" >&2
+              exit 1
+            fi
+          }
+
+          verify_status_code "create_release POST failed with status code"
+          RELEASE_ID=$(cat response.json | jq -r '.id')
+
+          for RUNTIME in win-x64 linux-x64 osx-x64
+          do
+            pushd bin/Release/$RUNTIME/publish
+
+            ARTIFACT_NAME=unity-debug-adapter-${{ github.ref_name }}-$RUNTIME.zip
+            curl -L -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              -H "Content-Type: application/octet-stream" \
+              "https://uploads.github.com/repos/walcht/unity-dap/releases/$RELEASE_ID/assets?name=$ARTIFACT_NAME" \
+              --data-binary "@$ARTIFACT_NAME" -o response.json
+
+            verify_status_code "upload_release_asset POST failed with status code"
+            popd
+          done
+
+          curl -L \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            https://api.github.com/repos/walcht/unity-dap/releases/$RELEASE_ID \
+            -d '{"tag_name":"${{ github.ref_name }}","name":"unity-debug-adapter-${{ github.ref_name }}","draft":false}' -o response.json
+
+          verify_status_code "update_release PATCH failed with status code"
+
+          rm response.json
+
+
+
