@@ -35,4 +35,8 @@
     <ProjectReference Include="..\unity-debug-adapter\unity-debug-adapter.csproj" />
   </ItemGroup>
 
+  <Target Name="CopyLogFile" AfterTargets="AfterBuild">
+    <Copy SourceFiles="mock-log.txt" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>

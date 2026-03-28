@@ -2,14 +2,12 @@
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
-using System.Threading.Tasks;
 using NUnit.Framework;
-using UnityDebugAdapter;
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Collections.Generic;
 using System;
-using System.Text;
+using Newtonsoft.Json;
+using System.Threading;
 
 namespace unity_debug_adapter.ITests
 {
@@ -17,8 +15,8 @@ namespace unity_debug_adapter.ITests
   /// End-to-End testing of the Unity debug session. Initially, I thought about making this trully end-to-end but
   /// launching Neovim, setting up breakpoints, steping in/out is simply too much work and too error-prone.
   ///
-  /// What I do instead is to supply DAP requests (that were captured in a real debugging session from Neovim <-> Unity)
-  /// and send them to this debug adapter and assert the responses (here I am assuming they remain the same - in case
+  /// What I do instead is to supply DAP m_Requests (that were captured in a real debugging session from Neovim <-> Unity)
+  /// and send them to this debug adapter and assert the m_Responses (here I am assuming they remain the same - in case
   /// they don't the response has to be parsed and only fields we care about have to be asserted).
   ///
   ///   log.txt: contains a request per line (without the Content-Length: (\d+)\r\n\r\n sequence)
@@ -30,14 +28,16 @@ namespace unity_debug_adapter.ITests
     private Process m_UnityProcess;
     private Process m_DebugAdapterProcess;
     private readonly Regex re = new Regex(@"Content-Length: (\d+)\r\n\r\n");
+    // private readonly Regex UNITY_EDITOR_PORT = new Regex(@"monoOptions.*127\.0\.0\.1:(\d+)");
+
+    private SortedDictionary<int, string> m_Requests;
+    private Dictionary<int, string> m_Responses;
+
+    private int m_MaxResponseLen = 0;
 
     [OneTimeSetUp]
     public void StartTest()
     {
-      // setup tracer/logger
-      Trace.Listeners.Add(new ConsoleTraceListener());
-
-
       // find Unity installation path
 #if Windows
       string unity_hub_editor_dir = "C:/Program Files/Unity/Hub/Editor";
@@ -52,7 +52,7 @@ namespace unity_debug_adapter.ITests
       var candidateEditors = Directory.EnumerateDirectories(unity_hub_editor_dir)
         .Where(unity_editor_version =>
             {
-              Trace.TraceInformation("found Unity editor version: " + unity_editor_version);
+              TestContext.Progress.WriteLine("found Unity editor version: " + unity_editor_version);
               return unity_editor_version.StartsWith("2022.3.");
             });
 
@@ -72,7 +72,7 @@ namespace unity_debug_adapter.ITests
 
       // if the provided Unity project is invalid, Unity simply doesn't launch and weirdly exits with a 0 exit code
       string unity_test_project = @"C:\Users\walid\Desktop\unity_test_project";  // Path.GetFullPath("./unity_test_project")
-      Trace.TraceInformation($"Unity executable is set to {unity_exe}");
+      TestContext.Progress.WriteLine($"Unity executable is set to {unity_exe}");
 
       // start debuggee (i.e., Unity) on the unity_test_project
       m_UnityProcess = new Process();
@@ -86,11 +86,18 @@ namespace unity_debug_adapter.ITests
       m_UnityProcess.StartInfo.RedirectStandardInput = false;
       m_UnityProcess.Start();
 
-      Trace.TraceInformation($"started Unity Editor process: {m_UnityProcess.StartInfo.FileName} {m_UnityProcess.StartInfo.Arguments}");
+      TestContext.Progress.WriteLine($"started Unity Editor process: {m_UnityProcess.StartInfo.FileName} {m_UnityProcess.StartInfo.Arguments}");
+      // 56000 + <UNITY-EDITOR-PID> % 1000
+      int port = 56000 + m_UnityProcess.Id % 1000;
+      TestContext.Progress.WriteLine($"Unity Editor debugger is listening at 127.0.0.1:{port}");
+
+      // wait for Unity Editor to launch
+      Thread.Sleep(20_000);
 
       // start debug adapter in another child process
       m_DebugAdapterProcess = new Process();
-      m_DebugAdapterProcess.StartInfo.FileName = "../bin/Release/unity-debug-adapter.exe";
+      // TODO: replace path
+      m_DebugAdapterProcess.StartInfo.FileName = "./unity-debug-adapter.exe";
       m_DebugAdapterProcess.StartInfo.Arguments = "--log-level=none";
       m_DebugAdapterProcess.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
       m_DebugAdapterProcess.StartInfo.CreateNoWindow = true;
@@ -100,14 +107,14 @@ namespace unity_debug_adapter.ITests
       m_DebugAdapterProcess.StartInfo.RedirectStandardInput = true;
       m_DebugAdapterProcess.Start();
 
-      Trace.TraceInformation($"started debug adapter process: {m_DebugAdapterProcess.StartInfo.FileName} {m_DebugAdapterProcess.StartInfo.Arguments}");
+      TestContext.Progress.WriteLine($"started debug adapter process: {m_DebugAdapterProcess.StartInfo.FileName} {m_DebugAdapterProcess.StartInfo.Arguments}");
 
-      // first, filter out responses/requests from the log file and save them in a string list
-      var requests = new SortedDictionary<int, string>();
-      var responses = new Dictionary<int, string>();
-      int maxResponseLen = 0;
+      // first, filter out m_Responses/m_Requests from the log file and save them in a string list
+      m_Requests = new SortedDictionary<int, string>();
+      m_Responses = new Dictionary<int, string>();
+      m_MaxResponseLen = 0;
 
-      foreach (string l in File.ReadAllLines("./log.txt"))
+      foreach (string l in File.ReadAllLines("./mock-log.txt"))
       {
         // because the logger logs \r\n\r\n sequence as rnrn
         var _l = l.Replace("rnrn", "\r\n\r\n");
@@ -116,24 +123,28 @@ namespace unity_debug_adapter.ITests
           continue;
 
         // l is always encoded in UTF8 so we can safely just use Length
-
         string body = _l.Substring(m.Index + "Content-Length: ".Length + m.Groups[1].Length + 4);
         var parsedJson = JObject.Parse(body);
         if (parsedJson == null)
         {
-          // TODO: error out
-          continue;
+          Assert.Fail($"parsed json log's string: {body} is null");
+          return;
         }
 
         var _type = (string?)parsedJson["type"];
         if (string.IsNullOrWhiteSpace(_type))
         {
-          // TODO: fail test if string is null
-          continue;
+          Assert.Fail($"type attribute of parsed JSON from log string: {body} is null or whitespace");
+          return;
         }
 
         // don't care about events for the moment
         if (_type == "event")
+          continue;
+
+        // if this is a threads command then ignore it (because it is non-deterministic...)
+        var command = (string?)parsedJson["command"];
+        if (command == "threads")
           continue;
 
         if (_type == "request")
@@ -141,10 +152,25 @@ namespace unity_debug_adapter.ITests
           var request_seq = (int?)parsedJson["seq"];
           if (request_seq == null)
           {
-            // TODO: error out
-            continue;
+            Assert.Fail("request_seq attribute is null");
+            return;
           }
-          requests.Add(request_seq.Value, _l.Substring(m.Index));
+
+          // if this is an attach request, then make sure to update the port
+          var cmd = (string?)parsedJson["command"];
+          if (cmd == "attach")
+          {
+            var args = parsedJson["arguments"];
+            if (args == null)
+            {
+              Assert.Fail("arguments attribute is null");
+              return;
+            }
+            args["port"] = port;
+          }
+
+          var v = parsedJson.ToString(Formatting.None);
+          m_Requests.Add(request_seq.Value, $"Content-Length: {v.Length}\r\n\r\n{v}");
           continue;
         }
 
@@ -153,136 +179,135 @@ namespace unity_debug_adapter.ITests
           var request_seq = (int?)parsedJson["request_seq"];
           if (request_seq == null)
           {
-            // TODO: error out
-            continue;
+            Assert.Fail("request_seq attribute is null");
+            return;
           }
-          responses.Add(request_seq.Value, _l.Substring(m.Index));
-          maxResponseLen = Math.Max(maxResponseLen, _l.Length - m.Index);
+
+          m_Responses.Add(request_seq.Value, _l.Substring(m.Index));
+          m_MaxResponseLen = Math.Max(m_MaxResponseLen, _l.Length - m.Index);
           continue;
         }
 
-        // TODO: error
+        Assert.Fail($"unkown type attribute in log line: {l}");
       }
 
-      Trace.TraceInformation($"parsed {responses.Count} responses from log.txt");
-      Trace.TraceInformation($"parsed {requests.Count} requests from log.txt");
-      Trace.TraceInformation($"max response length: {maxResponseLen}");
+      TestContext.Progress.WriteLine($"parsed {m_Responses.Count} m_Responses from log.txt");
+      TestContext.Progress.WriteLine($"parsed {m_Requests.Count} m_Requests from log.txt");
+      TestContext.Progress.WriteLine($"max response length: {m_MaxResponseLen}");
+    }
 
-      char[] buffer = new char[maxResponseLen];
-      foreach (var request in requests)
+    [Test]
+    public void Test_LogRequestsAndResponses()
+    {
+      var m_PendingRequests = new List<int>();
+      var buffer = new char[m_MaxResponseLen];
+      var iter = m_Requests.GetEnumerator();
+      iter.MoveNext();
+      while (true)
       {
-        int requestSeq = request.Key;
-        string requestStr = request.Value;
-        m_DebugAdapterProcess.StandardInput.Write(requestStr);
-        // now wait for response
+        // don't re-send the request if it is already pending
+        if (!m_PendingRequests.Contains(iter.Current.Key))
+        {
+          string requestStr = iter.Current.Value;
+          m_DebugAdapterProcess.StandardInput.Write(requestStr);
+
+          // now wait for response
+          TestContext.Progress.WriteLine($"sent request to unity-dap: {requestStr}");
+          TestContext.Progress.WriteLine("waiting for response from unity-dap ...");
+
+          m_PendingRequests.Add(iter.Current.Key);
+        }
+
         var nbrCharsReceived = m_DebugAdapterProcess.StandardOutput.Read(buffer, 0, buffer.Length);
         var responseStr = new string(buffer, 0, nbrCharsReceived);
         if (string.IsNullOrWhiteSpace(responseStr))
         {
-          // TODO: test fail here
-          continue;
+          Assert.Fail("received response string from unity-dap is null or whitespace");
+          return;
         }
 
-        var parsedJson = JObject.Parse(responseStr);
+        var m = re.Match(responseStr);
+        if (!m.Success || m.Groups.Count < 2)
+        {
+          Assert.Fail($@"failed to match 'Content-Length: (\d+)\r\n\r\n' from unity-dap response: {responseStr}");
+          return;
+        }
+
+        var bodyStr = responseStr.Substring("Content-Length: ".Length + m.Groups[1].Length + 4);
+        JObject? parsedJson;
+        try
+        {
+          parsedJson = JObject.Parse(bodyStr);
+        }
+        catch (JsonReaderException)
+        {
+          Assert.Fail($"failed to parse JSON from: {bodyStr}");
+          return;
+        }
         if (parsedJson == null)
         {
-          // TODO: test fail here
-          continue;
+          Assert.Fail($"parsed JSON from received response string: {bodyStr} from unity-dap is null");
+          return;
         }
+
+        // we don't care about other types (e.g., events)
+        var _type = (string?)parsedJson["type"];
+        if (_type != "response")
+          continue;
 
         var _requestSeq = (int?)parsedJson["request_seq"];
         if (_requestSeq == null)
         {
-          // TODO: test fail here
-          continue;
+          Assert.Fail($"request_seq attribute is null (from parsed json: {parsedJson})");
+          return;
         }
 
-        // fetch the response from the stored responses from log.txt
-        string? expectedResponse = responses[_requestSeq.Value];
+        TestContext.Progress.WriteLine($"got response to request_seq: {_requestSeq}");
+
+        // fetch the response from the stored m_Responses from log.txt
+        string? expectedResponse = m_Responses[_requestSeq.Value];
         if (string.IsNullOrWhiteSpace(expectedResponse))
         {
-          // TODO: test fail here
-          continue;
+          Assert.Fail($"could not find expected response in log responses (request_seq = {_requestSeq.Value})");
+          return;
         }
 
-        // TODO: test if expectedResponse == response
+        // this is probably not the best way to test that the response is correct because of sequence number
+        // and its reliance on threads (which may be non-deterministic)
+        Assert.That(responseStr, Is.EqualTo(expectedResponse));
 
+        // move to next request (if any)
+        if (!iter.MoveNext())
+          break;
       }
-
-      /*
-      foreach (string request in requests)
-      {
-
-        m_DebugAdapterProcess.StandardInput.Write(request);
-        // now wait for a response
-        string response = m_DebugAdapterProcess.StandardOutput.ReadLine();
-
-        var m = re.Match(response);
-
-        // TODO: get 
-
-        m_DebugAdapterProcess.StandardInput.Write($"Content-Length: ({l.Length})\r\n\r\n{l}");
-        //  then wait for the response on stdout
-        string response = m_DebugAdapterProcess.StandardOutput.ReadLine();
-        // Assert
-        Assert.That(response);
-      }
-      */
-
-      RunSession(Console.OpenStandardInput(), Console.OpenStandardOutput());
 
       m_UnityProcess.WaitForExit();
-      if (m_UnityProcess.ExitCode != 0)
-      {
-        Assert.Fail($"Unity process exited with non-0 exit code: {m_UnityProcess.ExitCode}");
-      }
-
-      Assert.Pass();
-
-      // get port:ip Unity Editor is listening on
-      // send attach request
-    }
-
-    [Test]
-    public void Test1()
-    {
-      Assert.Pass();
     }
 
     [OneTimeTearDown]
     public void EndTest()
     {
-      Trace.TraceInformation("killing Unity process ...");
-
+      // close Unity Editor
+      TestContext.Progress.WriteLine("killing Unity process ...");
       try
       {
         m_UnityProcess.Kill();
         m_UnityProcess.WaitForExit();
         m_UnityProcess.Dispose();
       }
-      catch (System.InvalidOperationException)
-      {
-        // probably means that process has already exited
-      }
+      catch (InvalidOperationException) { /* probably means that process has already exited */ }
 
-      Trace.TraceInformation("killing debug adapter process ...");
-
+      // close unity-dap
+      TestContext.Progress.WriteLine("killing debug adapter process ...");
       try
       {
         m_DebugAdapterProcess.Kill();
         m_DebugAdapterProcess.WaitForExit();
         m_DebugAdapterProcess.Dispose();
       }
-      catch (System.InvalidOperationException)
-      {
-        // probably means that process has already exited
-      }
+      catch (InvalidOperationException) { /* probably means that process has already exited */ }
 
-      Trace.TraceInformation("Unity process killed successfully");
-
-      Trace.Flush();
-      // close Unity Editor
-      // close logger
+      TestContext.Progress.WriteLine("Unity process killed successfully");
     }
   }
 }

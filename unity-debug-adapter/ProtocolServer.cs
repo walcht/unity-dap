@@ -100,7 +100,7 @@ namespace UnityDebugAdapter
           {
             var buf = _rawData.RemoveFirst(_bodyLength);
             string data = Encoding.UTF8.GetString(buf);
-            Logger.LogTrace("received data: Content-Length: ({0})rnrn{{{1}}}", _bodyLength, data);
+            Logger.LogTrace("received data: Content-Length: {0}rnrn{1}", _bodyLength, data);
             Dispatch(data);
             _bodyLength = -1;
             continue; // there may be more complete messages to process
