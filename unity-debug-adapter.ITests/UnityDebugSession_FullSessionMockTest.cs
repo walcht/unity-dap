@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System;
 using Newtonsoft.Json;
 using System.Threading;
+using System.Text;
 
 namespace unity_debug_adapter.ITests
 {
@@ -19,21 +20,35 @@ namespace unity_debug_adapter.ITests
   /// and send them to this debug adapter and assert the m_Responses (here I am assuming they remain the same - in case
   /// they don't the response has to be parsed and only fields we care about have to be asserted).
   ///
-  ///   log.txt: contains a request per line (without the Content-Length: (\d+)\r\n\r\n sequence)
+  ///   requests.txt: contains a request per line (with \r\n\r\n sequence replaced by rnrn)
+  ///   responses.txt: contains a response per line (with \r\n\r\n sequence replaced by rnrn) 
+  ///
+  /// Currently implemented commands and tested commands are:
+  ///
+  ///   COMMAND                   IS TESTED?
+  ///
+  ///   initialize                YES
+  ///   attach                    YES
+  ///   setBreakpoints            YES
+  ///   setExceptionBreakpoints   YES
+  ///
   /// </summary>
   [TestFixture]
   public class UnityDebugSession_FullSessionMockTest
   {
-    // private static readonly Regex UNITY_VERSION_REGEX = new Regex(@"(\d+)\.(\d+)");
     private Process m_UnityProcess;
     private Process m_DebugAdapterProcess;
     private readonly Regex re = new Regex(@"Content-Length: (\d+)\r\n\r\n");
-    // private readonly Regex UNITY_EDITOR_PORT = new Regex(@"monoOptions.*127\.0\.0\.1:(\d+)");
 
-    private SortedDictionary<int, string> m_Requests;
-    private Dictionary<int, string> m_Responses;
+    private readonly SortedDictionary<int, JObject> m_Requests = new SortedDictionary<int, JObject>();
+    private readonly Dictionary<int, JObject> m_Responses = new Dictionary<int, JObject>();
 
     private int m_MaxResponseLen = 0;
+    private int m_BodyLen = -1;
+    private readonly char[] m_ReceptionBuff = new char[4092];
+    private readonly StringBuilder m_Sb = new StringBuilder(4092);
+    private readonly Queue<string> m_Messages = new Queue<string>(16);
+    private readonly IEqualityComparer<JObject> m_Comparer = new DapResponseComparer();
 
     [OneTimeSetUp]
     public void StartTest()
@@ -71,13 +86,14 @@ namespace unity_debug_adapter.ITests
       }
 
       // if the provided Unity project is invalid, Unity simply doesn't launch and weirdly exits with a 0 exit code
-      string unity_test_project = @"C:\Users\walid\Desktop\unity_test_project";  // Path.GetFullPath("./unity_test_project")
+      string unity_test_project = Path.GetFullPath("./unity_test_project_2022_3");
       TestContext.Progress.WriteLine($"Unity executable is set to {unity_exe}");
+      TestContext.Progress.WriteLine($"Unity 2022.3 test project is set to {unity_test_project}");
 
       // start debuggee (i.e., Unity) on the unity_test_project
       m_UnityProcess = new Process();
       m_UnityProcess.StartInfo.FileName = unity_exe;  // -batchmode -nographics
-      m_UnityProcess.StartInfo.Arguments = $"-projectPath {unity_test_project}";
+      m_UnityProcess.StartInfo.Arguments = $"-projectPath {unity_test_project} -disableManagedDebugger -executeMethod  UnityEditor.EditorApplication.EnterPlaymode";
       m_UnityProcess.StartInfo.WindowStyle = ProcessWindowStyle.Normal;
       m_UnityProcess.StartInfo.CreateNoWindow = false;
       m_UnityProcess.StartInfo.UseShellExecute = false;
@@ -92,7 +108,7 @@ namespace unity_debug_adapter.ITests
       TestContext.Progress.WriteLine($"Unity Editor debugger is listening at 127.0.0.1:{port}");
 
       // wait for Unity Editor to launch
-      Thread.Sleep(20_000);
+      // Thread.Sleep(20_000);
 
       // start debug adapter in another child process
       m_DebugAdapterProcess = new Process();
@@ -108,13 +124,10 @@ namespace unity_debug_adapter.ITests
       m_DebugAdapterProcess.Start();
 
       TestContext.Progress.WriteLine($"started debug adapter process: {m_DebugAdapterProcess.StartInfo.FileName} {m_DebugAdapterProcess.StartInfo.Arguments}");
+      var testScriptFullPath = Path.GetFullPath("./unity_test_project_2022_3/Assets/Scripts/test_script.cs");
 
-      // first, filter out m_Responses/m_Requests from the log file and save them in a string list
-      m_Requests = new SortedDictionary<int, string>();
-      m_Responses = new Dictionary<int, string>();
-      m_MaxResponseLen = 0;
-
-      foreach (string l in File.ReadAllLines("./mock-log.txt"))
+      // parse requests
+      foreach (string l in File.ReadAllLines("./requests.txt"))
       {
         // because the logger logs \r\n\r\n sequence as rnrn
         var _l = l.Replace("rnrn", "\r\n\r\n");
@@ -124,164 +137,269 @@ namespace unity_debug_adapter.ITests
 
         // l is always encoded in UTF8 so we can safely just use Length
         string body = _l.Substring(m.Index + "Content-Length: ".Length + m.Groups[1].Length + 4);
-        var parsedJson = JObject.Parse(body);
-        if (parsedJson == null)
+        var actual = JObject.Parse(body);
+        if (actual == null)
         {
           Assert.Fail($"parsed json log's string: {body} is null");
           return;
         }
 
-        var _type = (string?)parsedJson["type"];
+        var _type = (string?)actual["type"];
         if (string.IsNullOrWhiteSpace(_type))
         {
           Assert.Fail($"type attribute of parsed JSON from log string: {body} is null or whitespace");
           return;
         }
 
-        // don't care about events for the moment
-        if (_type == "event")
-          continue;
-
-        // if this is a threads command then ignore it (because it is non-deterministic...)
-        var command = (string?)parsedJson["command"];
-        if (command == "threads")
-          continue;
-
-        if (_type == "request")
+        if (_type != "request")
         {
-          var request_seq = (int?)parsedJson["seq"];
-          if (request_seq == null)
-          {
-            Assert.Fail("request_seq attribute is null");
-            return;
-          }
-
-          // if this is an attach request, then make sure to update the port
-          var cmd = (string?)parsedJson["command"];
-          if (cmd == "attach")
-          {
-            var args = parsedJson["arguments"];
-            if (args == null)
-            {
-              Assert.Fail("arguments attribute is null");
-              return;
-            }
-            args["port"] = port;
-          }
-
-          var v = parsedJson.ToString(Formatting.None);
-          m_Requests.Add(request_seq.Value, $"Content-Length: {v.Length}\r\n\r\n{v}");
-          continue;
+          Assert.Fail($"expected type 'request' in requests.txt but found type: {_type}");
+          return;
         }
 
-        if (_type == "response")
+        var request_seq = (int?)actual["seq"];
+        if (request_seq == null)
         {
-          var request_seq = (int?)parsedJson["request_seq"];
-          if (request_seq == null)
-          {
-            Assert.Fail("request_seq attribute is null");
-            return;
-          }
-
-          m_Responses.Add(request_seq.Value, _l.Substring(m.Index));
-          m_MaxResponseLen = Math.Max(m_MaxResponseLen, _l.Length - m.Index);
-          continue;
+          Assert.Fail("seq attribute is null");
+          return;
         }
 
-        Assert.Fail($"unkown type attribute in log line: {l}");
+        // if this is an attach request, then make sure to update the port
+        var cmd = (string?)actual["command"];
+        if (cmd == "attach")
+        {
+          var args = actual["arguments"];
+          if (args == null)
+          {
+            Assert.Fail("arguments attribute is null");
+            return;
+          }
+          args["port"] = port;
+          args["name"] = $"Connect to Unity Editor instance at 127.0.0.1:{port}";
+        }
+        // if this is a 'setBreakpoints' request, then update the path
+        else if (cmd == "setBreakpoints")
+        {
+          var args = actual["arguments"];
+          if (args == null)
+          {
+            Assert.Fail("arguments attribute is null");
+            return;
+          }
+          var src = args["source"];
+          if (src == null)
+          {
+            Assert.Fail("source attribute is null");
+            return;
+          }
+          src["path"] = testScriptFullPath;
+        }
+        m_Requests.Add(request_seq.Value, actual);
       }
 
-      TestContext.Progress.WriteLine($"parsed {m_Responses.Count} m_Responses from log.txt");
-      TestContext.Progress.WriteLine($"parsed {m_Requests.Count} m_Requests from log.txt");
+      // parse response
+      foreach (var l in File.ReadLines("./responses.txt"))
+      {
+        // because the logger logs \r\n\r\n sequence as rnrn
+        var _l = l.Replace("rnrn", "\r\n\r\n");
+        var m = re.Match(_l);
+        if (!m.Success || m.Groups.Count < 2)
+          continue;
+
+        // l is always encoded in UTF8 so we can safely just use Length
+        string body = _l.Substring(m.Index + "Content-Length: ".Length + m.Groups[1].Length + 4);
+        var actual = JObject.Parse(body);
+        if (actual == null)
+        {
+          Assert.Fail($"parsed json log's string: {body} is null");
+          return;
+        }
+
+        var _type = (string?)actual["type"];
+        if (string.IsNullOrWhiteSpace(_type))
+        {
+          Assert.Fail($"type attribute of parsed JSON from log string: {body} is null or whitespace");
+          return;
+        }
+
+        if (_type != "response")
+        {
+          Assert.Fail($"expected type 'response' in responses.txt but found type: {_type}");
+          return;
+        }
+
+        var request_seq = (int?)actual["request_seq"];
+        if (request_seq == null)
+        {
+          Assert.Fail("request_seq attribute is null");
+          return;
+        }
+
+        // if this is a stackTrace response, then make sure to update the path
+        var cmd = (string?)actual["command"];
+        if (cmd == "stackTrace")
+        {
+          var bdy = actual["body"];
+          if (bdy == null)
+          {
+            Assert.Fail("body attribute is null");
+            return;
+          }
+
+          var sfs = bdy["stackFrames"];
+          if (sfs == null)
+          {
+            Assert.Fail("stackFrames attribute is null");
+            return;
+          }
+
+          foreach (var sf in sfs)
+          {
+            var src = sf["source"];
+            if (src == null)
+            {
+              Assert.Fail("source attribute is null");
+              return;
+            }
+
+            src["path"] = testScriptFullPath;
+          }
+        }
+
+        m_Responses.Add(request_seq.Value, actual);
+        m_MaxResponseLen = Math.Max(m_MaxResponseLen, _l.Length - m.Index);
+      }
+      TestContext.Progress.WriteLine($"parsed {m_Requests.Count} requests from requests.txt");
+      TestContext.Progress.WriteLine($"parsed {m_Responses.Count} responses from responses.txt");
       TestContext.Progress.WriteLine($"max response length: {m_MaxResponseLen}");
     }
+
+
+    /// Attempts to parse one or more messages from string buffer. If message is fragmented, a subsequent call
+    /// to this after having filled up the string buffer will re-construct that message.
+    private void GetNextMessage()
+    {
+      while (true)
+      {
+        if (m_BodyLen >= 0)
+        {
+          if (m_ReceptionBuff.Length >= m_BodyLen)
+          {
+            m_Messages.Enqueue(m_Sb.ToString(0, m_BodyLen));
+            m_Sb.Remove(0, m_BodyLen);
+            m_BodyLen = -1;
+            continue;  // handle next message (if any)
+          }
+          // currently held data is insufficient (keep reading)
+          else
+          {
+            return;
+          }
+        }
+        else
+        {
+          if (m_Sb.Length == 0)
+            break;
+
+          var s = m_Sb.ToString();
+
+          Match m = re.Match(s);
+          if (m.Success && m.Groups.Count == 2)
+          {
+            m_BodyLen = Convert.ToInt32(m.Groups[1].Value);
+            m_Sb.Remove(0, m.Index + "Content-Length: ".Length + m.Groups[1].Length + 4);
+            continue;
+          }
+          else
+          {
+            Assert.Fail($@"failed to match 'Content-Length: (\d+)\r\n\r\n' from unity-dap response: {s}");
+            return;
+          }
+        }
+      }
+
+    }
+
 
     [Test]
     public void Test_LogRequestsAndResponses()
     {
-      var m_PendingRequests = new List<int>();
-      var buffer = new char[m_MaxResponseLen];
-      var iter = m_Requests.GetEnumerator();
-      iter.MoveNext();
-      while (true)
+      foreach (var item in m_Requests)
       {
-        // don't re-send the request if it is already pending
-        if (!m_PendingRequests.Contains(iter.Current.Key))
+        var request = item.Value;
+        var requestStr = request.ToString(Formatting.None);
+        m_DebugAdapterProcess.StandardInput.Write($"Content-Length: {requestStr.Length}\r\n\r\n{requestStr}");
+        TestContext.Progress.WriteLine($"sent request to unity-dap: command={(string?)request["command"]}");
+
+        // keep reading from unity-dap's stdout until we get the reponse to the request we just sent
+        bool gotResponse = false;
+        while (!gotResponse)
         {
-          string requestStr = iter.Current.Value;
-          m_DebugAdapterProcess.StandardInput.Write(requestStr);
+          // message can be fragmented (even if buffer is large enough)!
+          var nbrCharsReceived = m_DebugAdapterProcess.StandardOutput.Read(m_ReceptionBuff, 0, m_ReceptionBuff.Length);
+          m_Sb.Append(m_ReceptionBuff, 0, nbrCharsReceived);
+          GetNextMessage();
 
-          // now wait for response
-          TestContext.Progress.WriteLine($"sent request to unity-dap: {requestStr}");
-          TestContext.Progress.WriteLine("waiting for response from unity-dap ...");
+          // keep reading received messages until we encounter the one we care about (with request_seq set to the above
+          // reques) or until messages are exhausted.
+          while (m_Messages.Count > 0)
+          {
+            string bodyStr = m_Messages.Dequeue();
+            JObject? actual;
+            try
+            {
+              actual = JObject.Parse(bodyStr);
+            }
+            catch (JsonReaderException)
+            {
+              Assert.Fail($"failed to parse JSON from: {bodyStr}");
+              return;
+            }
+            if (actual == null)
+            {
+              Assert.Fail($"parsed JSON from received response string: {bodyStr} from unity-dap is null");
+              return;
+            }
 
-          m_PendingRequests.Add(iter.Current.Key);
-        }
+            // we don't care about other types (e.g., events)
+            var _type = (string?)actual["type"];
+            if (_type != "response")
+              continue;
 
-        var nbrCharsReceived = m_DebugAdapterProcess.StandardOutput.Read(buffer, 0, buffer.Length);
-        var responseStr = new string(buffer, 0, nbrCharsReceived);
-        if (string.IsNullOrWhiteSpace(responseStr))
-        {
-          Assert.Fail("received response string from unity-dap is null or whitespace");
-          return;
-        }
+            var _requestSeq = (int?)actual["request_seq"];
+            if (_requestSeq == null)
+            {
+              Assert.Fail($"request_seq attribute is null (from parsed json: {actual})");
+              return;
+            }
 
-        var m = re.Match(responseStr);
-        if (!m.Success || m.Groups.Count < 2)
-        {
-          Assert.Fail($@"failed to match 'Content-Length: (\d+)\r\n\r\n' from unity-dap response: {responseStr}");
-          return;
-        }
+            if (_requestSeq != item.Key)
+            {
+              Assert.Fail($"reponse to unexpected request_seq (expected: {item.Key}; got response to: {_requestSeq})");
+              return;
+            }
 
-        var bodyStr = responseStr.Substring("Content-Length: ".Length + m.Groups[1].Length + 4);
-        JObject? parsedJson;
-        try
-        {
-          parsedJson = JObject.Parse(bodyStr);
-        }
-        catch (JsonReaderException)
-        {
-          Assert.Fail($"failed to parse JSON from: {bodyStr}");
-          return;
-        }
-        if (parsedJson == null)
-        {
-          Assert.Fail($"parsed JSON from received response string: {bodyStr} from unity-dap is null");
-          return;
-        }
+            TestContext.Progress.WriteLine($"got response to request_seq: {_requestSeq}");
 
-        // we don't care about other types (e.g., events)
-        var _type = (string?)parsedJson["type"];
-        if (_type != "response")
-          continue;
+            // fetch the response from the stored m_Responses from log.txt
+            var expected = m_Responses[_requestSeq.Value];
+            if (expected == null)
+            {
+              Assert.Fail($"could not find expected response in log responses (request_seq = {_requestSeq.Value})");
+              return;
+            }
 
-        var _requestSeq = (int?)parsedJson["request_seq"];
-        if (_requestSeq == null)
-        {
-          Assert.Fail($"request_seq attribute is null (from parsed json: {parsedJson})");
-          return;
-        }
+            Assert.That(actual, Is.EqualTo(expected).Using(m_Comparer));
+            m_Messages.Clear();
 
-        TestContext.Progress.WriteLine($"got response to request_seq: {_requestSeq}");
+            gotResponse = true;
+            break;
 
-        // fetch the response from the stored m_Responses from log.txt
-        string? expectedResponse = m_Responses[_requestSeq.Value];
-        if (string.IsNullOrWhiteSpace(expectedResponse))
-        {
-          Assert.Fail($"could not find expected response in log responses (request_seq = {_requestSeq.Value})");
-          return;
-        }
+          }  // END MESSAGES WHILE
 
-        // this is probably not the best way to test that the response is correct because of sequence number
-        // and its reliance on threads (which may be non-deterministic)
-        Assert.That(responseStr, Is.EqualTo(expectedResponse));
+        }  // END STDOUT.READ WHILE
 
-        // move to next request (if any)
-        if (!iter.MoveNext())
-          break;
-      }
-
-      m_UnityProcess.WaitForExit();
+      }  // END REQUESTS WHILE
     }
 
     [OneTimeTearDown]
@@ -309,6 +427,47 @@ namespace unity_debug_adapter.ITests
 
       TestContext.Progress.WriteLine("Unity process killed successfully");
     }
+  }
+
+
+  public class DapResponseComparer : IEqualityComparer<JObject>
+  {
+    public bool Equals(JObject? o1, JObject? o2)
+    {
+
+      if (o1 == null && o2 == null)
+        return true;
+
+      if (o1 == null || o2 == null)
+        return false;
+
+      // protocol message attributes (we ignore Seq as it may change - E.g., when we have different number of threads
+      // and therefore events sent for each thread).
+      if ((string?)o1["type"] != (string?)o2["type"])
+        return false;
+
+      if ((int?)o1["request_seq"] != (int?)o2["request_seq"])
+        return false;
+
+      if ((bool?)o1["success"] != (bool?)o2["success"])
+        return false;
+
+      if ((string?)o1["command"] != (string?)o2["command"])
+        return false;
+
+      if ((string?)o1["message"] != (string?)o2["message"])
+        return false;
+
+      // it's really hard to test the threads command because, again, it varies depending on the runtime conditions
+      // (you get different response each time you run this test which is not ideal for testing)
+      if ((string?)o1["command"] == "threads")
+        return true;
+
+      // for all other commands, simlpy compare the bodies
+      return JToken.DeepEquals(o1["body"], o2["body"]);
+    }
+
+    public int GetHashCode(JObject o) => o.GetHashCode();
   }
 }
 
