@@ -135,6 +135,12 @@
       },
       "url": "https://packages.unity.com"
     },
+    "com.walcht.ide.neovim": {
+      "version": "file:C:/Users/walid/Desktop/com.walcht.ide.neovim",
+      "depth": 0,
+      "source": "local",
+      "dependencies": {}
+    },
     "com.unity.modules.ai": {
       "version": "1.0.0",
       "depth": 0,

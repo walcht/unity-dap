@@ -7,7 +7,6 @@ using Newtonsoft.Json.Linq;
 using System.Collections.Generic;
 using System;
 using Newtonsoft.Json;
-using System.Threading;
 using System.Text;
 
 namespace unity_debug_adapter.ITests
@@ -43,41 +42,40 @@ namespace unity_debug_adapter.ITests
     private readonly SortedDictionary<int, JObject> m_Requests = new SortedDictionary<int, JObject>();
     private readonly Dictionary<int, JObject> m_Responses = new Dictionary<int, JObject>();
 
-    private int m_MaxResponseLen = 0;
-    private int m_BodyLen = -1;
     private readonly char[] m_ReceptionBuff = new char[4092];
     private readonly StringBuilder m_Sb = new StringBuilder(4092);
     private readonly Queue<string> m_Messages = new Queue<string>(16);
     private readonly IEqualityComparer<JObject> m_Comparer = new DapResponseComparer();
+
+    private int m_BodyLen = -1;
 
     [OneTimeSetUp]
     public void StartTest()
     {
       // find Unity installation path
 #if Windows
-      string unity_hub_editor_dir = "C:/Program Files/Unity/Hub/Editor";
+      string unity_hub_editor_dir = @"C:\Program Files\Unity\Hub\Editor";
 #elif Linux
-      string unity_hub_editor_dir = "/home/<user>/Unity/Hub/Editor";
+      string unity_hub_editor_dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Unity", "Hub", "Editor");
 #else
       string unity_hub_editor_dir = "/Applications/Unity/Hub/Editor";
 #endif
 
       // we test on 2022.3.X so we expect an editor of that version to be installed
-      // TODO: wtf - how to make this shit work?
-      var candidateEditors = Directory.EnumerateDirectories(unity_hub_editor_dir)
-        .Where(unity_editor_version =>
+      var unity_dir = Directory.EnumerateDirectories(unity_hub_editor_dir)
+        .FirstOrDefault(unity_editor_version =>
             {
-              TestContext.Progress.WriteLine("found Unity editor version: " + unity_editor_version);
-              return unity_editor_version.StartsWith("2022.3.");
+              TestContext.Progress.WriteLine("found Unity editor version: " + Path.GetFileName(unity_editor_version));
+              return Path.GetFileName(unity_editor_version).StartsWith("2022.3.");
             });
 
+      TestContext.Progress.WriteLine($"picked Unity editor version: {unity_dir}");
 #if Windows
-      // string unity_exe = Path.Combine(unity_hub_editor_dir, candidateEditors.FirstOrDefault(), "Editor", "Unity.exe");
-      string unity_exe = @"C:\Program Files\Unity\Hub\Editor\2022.3.62f3\Editor\Unity.exe";
+      string unity_exe = Path.Combine(unity_dir, "Editor", "Unity.exe");
 #elif Linux
-      string unity_exe = Path.Combine(unity_hub_editor_dir, candidateEditors.FirstOrDefault(), "Editor", "Unity");
+      string unity_exe = Path.Combine(unity_dir, "Editor", "Unity");
 #else // MacOS
-      string unity_exe = Path.Combine(unity_hub_editor_dir, candidateEditors.FirstOrDefault(), "Unity.app", "Contents", "MacOS", "Unity");
+      string unity_exe = Path.Combine(unity_dir, "Unity.app", "Contents", "MacOS", "Unity");
 #endif
 
       if (string.IsNullOrWhiteSpace(unity_exe))
@@ -86,14 +84,14 @@ namespace unity_debug_adapter.ITests
       }
 
       // if the provided Unity project is invalid, Unity simply doesn't launch and weirdly exits with a 0 exit code
-      string unity_test_project = Path.GetFullPath("./unity_test_project_2022_3");
+      string unity_test_project = @"C:\Users\walid\Desktop\unity-dap\unity-debug-adapter.ITests\unity_test_project_2022_3";// Path.GetFullPath("./unity_test_project_2022_3");
       TestContext.Progress.WriteLine($"Unity executable is set to {unity_exe}");
       TestContext.Progress.WriteLine($"Unity 2022.3 test project is set to {unity_test_project}");
 
       // start debuggee (i.e., Unity) on the unity_test_project
       m_UnityProcess = new Process();
       m_UnityProcess.StartInfo.FileName = unity_exe;  // -batchmode -nographics
-      m_UnityProcess.StartInfo.Arguments = $"-projectPath {unity_test_project} -disableManagedDebugger -executeMethod  UnityEditor.EditorApplication.EnterPlaymode";
+      m_UnityProcess.StartInfo.Arguments = $"-projectPath {unity_test_project} -executeMethod  UnityEditor.EditorApplication.EnterPlaymode";
       m_UnityProcess.StartInfo.WindowStyle = ProcessWindowStyle.Normal;
       m_UnityProcess.StartInfo.CreateNoWindow = false;
       m_UnityProcess.StartInfo.UseShellExecute = false;
@@ -107,12 +105,8 @@ namespace unity_debug_adapter.ITests
       int port = 56000 + m_UnityProcess.Id % 1000;
       TestContext.Progress.WriteLine($"Unity Editor debugger is listening at 127.0.0.1:{port}");
 
-      // wait for Unity Editor to launch
-      // Thread.Sleep(20_000);
-
       // start debug adapter in another child process
       m_DebugAdapterProcess = new Process();
-      // TODO: replace path
       m_DebugAdapterProcess.StartInfo.FileName = "./unity-debug-adapter.exe";
       m_DebugAdapterProcess.StartInfo.Arguments = "--log-level=none";
       m_DebugAdapterProcess.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
@@ -124,7 +118,7 @@ namespace unity_debug_adapter.ITests
       m_DebugAdapterProcess.Start();
 
       TestContext.Progress.WriteLine($"started debug adapter process: {m_DebugAdapterProcess.StartInfo.FileName} {m_DebugAdapterProcess.StartInfo.Arguments}");
-      var testScriptFullPath = Path.GetFullPath("./unity_test_project_2022_3/Assets/Scripts/test_script.cs");
+      var testScriptFullPath = Path.Combine(unity_test_project, "Assets", "Scripts", "test_script.cs");
 
       // parse requests
       foreach (string l in File.ReadAllLines("./requests.txt"))
@@ -267,11 +261,10 @@ namespace unity_debug_adapter.ITests
         }
 
         m_Responses.Add(request_seq.Value, actual);
-        m_MaxResponseLen = Math.Max(m_MaxResponseLen, _l.Length - m.Index);
       }
       TestContext.Progress.WriteLine($"parsed {m_Requests.Count} requests from requests.txt");
       TestContext.Progress.WriteLine($"parsed {m_Responses.Count} responses from responses.txt");
-      TestContext.Progress.WriteLine($"max response length: {m_MaxResponseLen}");
+      Assert.That(m_Requests, Has.Count.EqualTo(m_Responses.Count));
     }
 
 
@@ -379,7 +372,7 @@ namespace unity_debug_adapter.ITests
               return;
             }
 
-            TestContext.Progress.WriteLine($"got response to request_seq: {_requestSeq}");
+            TestContext.Progress.WriteLine($"got response to request_seq: {_requestSeq} {actual.ToString(Formatting.None)}");
 
             // fetch the response from the stored m_Responses from log.txt
             var expected = m_Responses[_requestSeq.Value];
