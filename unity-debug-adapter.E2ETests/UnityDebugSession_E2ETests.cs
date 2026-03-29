@@ -9,7 +9,7 @@ using System;
 using Newtonsoft.Json;
 using System.Text;
 
-namespace unity_debug_adapter.ITests
+namespace unity_debug_adapter.E2ETests
 {
   /// <summary>
   /// End-to-End testing of the Unity debug session. Initially, I thought about making this trully end-to-end but
@@ -33,7 +33,7 @@ namespace unity_debug_adapter.ITests
   ///
   /// </summary>
   [TestFixture]
-  public class UnityDebugSession_FullSessionMockTest
+  public class UnityDebugSession_E2ETests
   {
     private Process m_UnityProcess;
     private Process m_DebugAdapterProcess;
@@ -84,13 +84,17 @@ namespace unity_debug_adapter.ITests
       }
 
       // if the provided Unity project is invalid, Unity simply doesn't launch and weirdly exits with a 0 exit code
-      string unity_test_project = @"C:\Users\walid\Desktop\unity-dap\unity-debug-adapter.ITests\unity_test_project_2022_3";// Path.GetFullPath("./unity_test_project_2022_3");
+      // this is ugly (bin/Debug/) but trust me, copying Unity porjects around is a mess ...
+      string unity_test_project = Path.GetFullPath("../../unity_test_project_2022_3");
+
+      Assert.That(Directory.Exists(unity_test_project), Is.True);
+
       TestContext.Progress.WriteLine($"Unity executable is set to {unity_exe}");
       TestContext.Progress.WriteLine($"Unity 2022.3 test project is set to {unity_test_project}");
 
-      // start debuggee (i.e., Unity) on the unity_test_project
+      // start debuggee (i.e., Unity) on the unity_test_project (don't put the '-nographics' or '-batchmode' flags!)
       m_UnityProcess = new Process();
-      m_UnityProcess.StartInfo.FileName = unity_exe;  // -batchmode -nographics
+      m_UnityProcess.StartInfo.FileName = unity_exe;
       m_UnityProcess.StartInfo.Arguments = $"-projectPath {unity_test_project} -executeMethod  UnityEditor.EditorApplication.EnterPlaymode";
       m_UnityProcess.StartInfo.WindowStyle = ProcessWindowStyle.Normal;
       m_UnityProcess.StartInfo.CreateNoWindow = false;
@@ -107,7 +111,7 @@ namespace unity_debug_adapter.ITests
 
       // start debug adapter in another child process
       m_DebugAdapterProcess = new Process();
-      m_DebugAdapterProcess.StartInfo.FileName = "./unity-debug-adapter.exe";
+      m_DebugAdapterProcess.StartInfo.FileName = "unity-debug-adapter.exe";
       m_DebugAdapterProcess.StartInfo.Arguments = "--log-level=none";
       m_DebugAdapterProcess.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
       m_DebugAdapterProcess.StartInfo.CreateNoWindow = true;
@@ -118,10 +122,10 @@ namespace unity_debug_adapter.ITests
       m_DebugAdapterProcess.Start();
 
       TestContext.Progress.WriteLine($"started debug adapter process: {m_DebugAdapterProcess.StartInfo.FileName} {m_DebugAdapterProcess.StartInfo.Arguments}");
-      var testScriptFullPath = Path.Combine(unity_test_project, "Assets", "Scripts", "test_script.cs");
+      var testScriptFullPath = Path.Combine(unity_test_project, "Assets", "Scripts", "TestScript.cs");
 
-      // parse requests
-      foreach (string l in File.ReadAllLines("./requests.txt"))
+      // parse requests and responses
+      foreach (string l in File.ReadAllLines("log.txt"))
       {
         // because the logger logs \r\n\r\n sequence as rnrn
         var _l = l.Replace("rnrn", "\r\n\r\n");
@@ -145,125 +149,91 @@ namespace unity_debug_adapter.ITests
           return;
         }
 
-        if (_type != "request")
+        if (_type == "request")
         {
-          Assert.Fail($"expected type 'request' in requests.txt but found type: {_type}");
-          return;
-        }
-
-        var request_seq = (int?)actual["seq"];
-        if (request_seq == null)
-        {
-          Assert.Fail("seq attribute is null");
-          return;
-        }
-
-        // if this is an attach request, then make sure to update the port
-        var cmd = (string?)actual["command"];
-        if (cmd == "attach")
-        {
-          var args = actual["arguments"];
-          if (args == null)
+          var request_seq = (int?)actual["seq"];
+          if (request_seq == null)
           {
-            Assert.Fail("arguments attribute is null");
+            Assert.Fail("seq attribute is null");
             return;
           }
-          args["port"] = port;
-          args["name"] = $"Connect to Unity Editor instance at 127.0.0.1:{port}";
-        }
-        // if this is a 'setBreakpoints' request, then update the path
-        else if (cmd == "setBreakpoints")
-        {
-          var args = actual["arguments"];
-          if (args == null)
+          // if this is an attach request, then make sure to update the port
+          var cmd = (string?)actual["command"];
+          if (cmd == "attach")
           {
-            Assert.Fail("arguments attribute is null");
-            return;
+            var args = actual["arguments"];
+            if (args == null)
+            {
+              Assert.Fail("arguments attribute is null");
+              return;
+            }
+            args["port"] = port;
+            args["name"] = $"Connect to Unity Editor instance at 127.0.0.1:{port}";
           }
-          var src = args["source"];
-          if (src == null)
+          // if this is a 'setBreakpoints' request, then update the path
+          else if (cmd == "setBreakpoints")
           {
-            Assert.Fail("source attribute is null");
-            return;
-          }
-          src["path"] = testScriptFullPath;
-        }
-        m_Requests.Add(request_seq.Value, actual);
-      }
-
-      // parse response
-      foreach (var l in File.ReadLines("./responses.txt"))
-      {
-        // because the logger logs \r\n\r\n sequence as rnrn
-        var _l = l.Replace("rnrn", "\r\n\r\n");
-        var m = re.Match(_l);
-        if (!m.Success || m.Groups.Count < 2)
-          continue;
-
-        // l is always encoded in UTF8 so we can safely just use Length
-        string body = _l.Substring(m.Index + "Content-Length: ".Length + m.Groups[1].Length + 4);
-        var actual = JObject.Parse(body);
-        if (actual == null)
-        {
-          Assert.Fail($"parsed json log's string: {body} is null");
-          return;
-        }
-
-        var _type = (string?)actual["type"];
-        if (string.IsNullOrWhiteSpace(_type))
-        {
-          Assert.Fail($"type attribute of parsed JSON from log string: {body} is null or whitespace");
-          return;
-        }
-
-        if (_type != "response")
-        {
-          Assert.Fail($"expected type 'response' in responses.txt but found type: {_type}");
-          return;
-        }
-
-        var request_seq = (int?)actual["request_seq"];
-        if (request_seq == null)
-        {
-          Assert.Fail("request_seq attribute is null");
-          return;
-        }
-
-        // if this is a stackTrace response, then make sure to update the path
-        var cmd = (string?)actual["command"];
-        if (cmd == "stackTrace")
-        {
-          var bdy = actual["body"];
-          if (bdy == null)
-          {
-            Assert.Fail("body attribute is null");
-            return;
-          }
-
-          var sfs = bdy["stackFrames"];
-          if (sfs == null)
-          {
-            Assert.Fail("stackFrames attribute is null");
-            return;
-          }
-
-          foreach (var sf in sfs)
-          {
-            var src = sf["source"];
+            var args = actual["arguments"];
+            if (args == null)
+            {
+              Assert.Fail("arguments attribute is null");
+              return;
+            }
+            var src = args["source"];
             if (src == null)
             {
               Assert.Fail("source attribute is null");
               return;
             }
-
             src["path"] = testScriptFullPath;
           }
+          m_Requests.Add(request_seq.Value, actual);
         }
+        else if (_type == "response")
+        {
+          var request_seq = (int?)actual["request_seq"];
+          if (request_seq == null)
+          {
+            Assert.Fail("request_seq attribute is null");
+            return;
+          }
 
-        m_Responses.Add(request_seq.Value, actual);
+          // if this is a stackTrace response, then make sure to update the path
+          var cmd = (string?)actual["command"];
+          if (cmd == "stackTrace")
+          {
+            var bdy = actual["body"];
+            if (bdy == null)
+            {
+              Assert.Fail("body attribute is null");
+              return;
+            }
+
+            var sfs = bdy["stackFrames"];
+            if (sfs == null)
+            {
+              Assert.Fail("stackFrames attribute is null");
+              return;
+            }
+
+            foreach (var sf in sfs)
+            {
+              var src = sf["source"];
+              if (src == null)
+              {
+                Assert.Fail("source attribute is null");
+                return;
+              }
+
+              src["path"] = testScriptFullPath;
+            }
+          }
+          m_Responses.Add(request_seq.Value, actual);
+        }
       }
-      TestContext.Progress.WriteLine($"parsed {m_Requests.Count} requests from requests.txt");
-      TestContext.Progress.WriteLine($"parsed {m_Responses.Count} responses from responses.txt");
+
+      TestContext.Progress.WriteLine($"parsed {m_Requests.Count} requests from log.txt");
+      TestContext.Progress.WriteLine($"parsed {m_Responses.Count} responses from log.txt");
       Assert.That(m_Requests, Has.Count.EqualTo(m_Responses.Count));
     }
 

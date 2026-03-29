@@ -3,16 +3,15 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
-public class test_script : MonoBehaviour
+public class TestScript : MonoBehaviour
 {
-  private float m_Speed = 30.0f;
-  private float m_Radius = 5.0f;
+  private readonly float m_Radius = 5.0f;
   static bool s_StaticBoolVar = false;
 
   // Start is called before the first frame update
   void Start()
   {
-    s_StaticBoolVar = true;
+    s_StaticBoolVar = true;  // <WATCH>
   }
 
   // Update is called once per frame
